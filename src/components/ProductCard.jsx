@@ -1,7 +1,32 @@
+// src/components/ProductCard.jsx
 import React from "react";
 
-export default function ProductCard({ product, isSaved, onToggleSave, onTagClick }) {
-  const { id, name, price, imageUrl, tags = [], link } = product;
+export default function ProductCard({
+  product,
+  user,                 // ✅ 추가: 로그인 여부 확인용
+  isSaved = false,
+  onToggleSave,
+  onTagClick,
+}) {
+  const {
+    id,
+    name,
+    price,
+    imageUrl,
+    tags = [],
+    link,
+    categoryL1,
+    categoryL2,
+  } = product || {};
+
+  // ✅ 로그인 필요 시 경고 후 차단
+  const tryToggle = () => {
+    if (!user) {
+      alert("로그인이 필요합니다.");
+      return;
+    }
+    onToggleSave && onToggleSave(id);
+  };
 
   return (
     <div
@@ -42,11 +67,41 @@ export default function ProductCard({ product, isSaved, onToggleSave, onTagClick
       </a>
 
       <div style={{ fontWeight: 600 }}>{name}</div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {categoryL1 && (
+          <span
+            style={{
+              fontSize: 12,
+              background: "#eef2ff",
+              border: "1px solid #e5e7eb",
+              padding: "2px 8px",
+              borderRadius: 9999,
+            }}
+          >
+            L1: {categoryL1}
+          </span>
+        )}
+        {categoryL2 && (
+          <span
+            style={{
+              fontSize: 12,
+              background: "#ecfeff",
+              border: "1px solid #e5e7eb",
+              padding: "2px 8px",
+              borderRadius: 9999,
+            }}
+          >
+            L2: {categoryL2}
+          </span>
+        )}
+      </div>
+
       <div style={{ color: "#111827" }}>
         {typeof price === "number" ? price.toLocaleString() + "원" : "-"}
       </div>
 
-      {tags?.length > 0 && (
+      {tags.length > 0 && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {tags.map((t) => (
             <button
@@ -68,7 +123,7 @@ export default function ProductCard({ product, isSaved, onToggleSave, onTagClick
       )}
 
       <button
-        onClick={() => onToggleSave(id)}
+        onClick={tryToggle}            // ✅ 여기만 바뀜
         style={{
           marginTop: 6,
           borderRadius: 8,

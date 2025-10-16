@@ -26,11 +26,8 @@ function Navbar() {
         }}
       >
         <Link to="/">카탈로그</Link>
-        <Link to="/saved">저장목록</Link>
-         <Link to="/import">import</Link>
-        <Link to="/edit">edit</Link>
-       <Link to="/import-csv">import-csv</Link>
-        
+        <Link to="/saved">Save</Link>
+        <Link to="/edit">Admin</Link>       
       </div>
     </nav>
   );
