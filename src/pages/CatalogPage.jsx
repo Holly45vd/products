@@ -1,10 +1,39 @@
-// src/pages/CatalogPage.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import { db } from "../firebase";
 import useSavedProducts from "../hooks/useSavedProducts";
-import Navbar from "../components/Navbar";
 import ProductCard from "../components/ProductCard";
+
+/* ================= MUI ================= */
+import {
+  Container,
+  Box,
+  Grid,
+  Card,
+  CardContent,
+  TextField,
+  Select,
+  MenuItem,
+  Button,
+  Chip,
+  Stack,
+  Divider,
+  Typography,
+  InputAdornment,
+  Paper,
+  ToggleButtonGroup,
+  ToggleButton,
+  Tooltip,
+  CircularProgress,
+  Checkbox,                 // ✅ 추가
+  FormControlLabel,         // ✅ 추가
+} from "@mui/material";
+import SearchIcon from "@mui/icons-material/Search";
+import FilterAltIcon from "@mui/icons-material/FilterAlt";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import LocalOfferIcon from "@mui/icons-material/LocalOffer";
+import CategoryIcon from "@mui/icons-material/Category";
+import LayersIcon from "@mui/icons-material/Layers";
 
 /** 카테고리 맵 (필터용) */
 const CATEGORY_MAP = {
@@ -59,6 +88,9 @@ export default function CatalogPage() {
   const [fCatL2, setFCatL2] = useState("");
   const [fTag, setFTag] = useState("");
 
+  // ✅ 재입고 예정 제외 체크박스 상태
+  const [excludeRestock, setExcludeRestock] = useState(false);
+
   // 태그 검색 결과 기반 카테고리 파셋
   const [facetCatsL1, setFacetCatsL1] = useState(new Set()); // 선택된 L1 카테고리들
   const [facetMode, setFacetMode] = useState("include");     // 'include' | 'exclude'
@@ -87,21 +119,17 @@ export default function CatalogPage() {
 
   /** 태그 검색 결과 기반 L1 파셋 집계 (카테고리 드롭다운 필터는 제외하고 계산) */
   const tagFacetsL1 = useMemo(() => {
-    // 태그 검색이 없으면 파셋 숨김
     const tagTokens = tokenizeTags(fTag);
     if (!tagTokens.length) return new Map();
 
     let base = items;
-
     if (onlySaved && user) base = base.filter((p) => savedIds.has(p.id));
 
-    // 태그 조건
     base = base.filter((p) => {
       const tagSet = new Set((p.tags || []).map((t) => String(t).toLowerCase()));
       return tagTokens.every((t) => tagSet.has(t));
     });
 
-    // 키워드 검색(카테고리 드롭다운은 제외) — 파셋용 시야만 좁혀줌
     const k = qText.trim().toLowerCase();
     if (k) {
       base = base.filter((p) => {
@@ -111,7 +139,6 @@ export default function CatalogPage() {
       });
     }
 
-    // L1 카운트
     const map = new Map(); // L1 -> count
     base.forEach((p) => {
       const l1 = p.categoryL1 || "(미지정)";
@@ -155,7 +182,12 @@ export default function CatalogPage() {
       });
     }
 
-    // 태그 파셋(포함/제외) 적용: 태그 검색이 있을 때만 의미 있게 적용
+    // ✅ 재입고 예정 제외 체크 적용
+    if (excludeRestock) {
+      base = base.filter((p) => !isRestockPending(p));
+    }
+
+    // 태그 파셋(포함/제외) 적용
     if (fTag && facetCatsL1.size > 0) {
       base = base.filter((p) => {
         const key = p.categoryL1 || "(미지정)";
@@ -165,7 +197,7 @@ export default function CatalogPage() {
     }
 
     return base;
-  }, [items, onlySaved, user, savedIds, fCatL1, fCatL2, fTag, qText, facetCatsL1, facetMode]);
+  }, [items, onlySaved, user, savedIds, fCatL1, fCatL2, fTag, qText, excludeRestock, facetCatsL1, facetMode]);
 
   const resetFilters = () => {
     setFCatL1("");
@@ -173,240 +205,267 @@ export default function CatalogPage() {
     setFTag("");
     setFacetCatsL1(new Set());
     setFacetMode("include");
+    setExcludeRestock(false);     // ✅ 함께 초기화
   };
 
   const l2Options = fCatL1 ? CATEGORY_MAP[fCatL1] || [] : [];
 
   return (
-    <div style={{ maxWidth: 1100, margin: "0 auto", padding: 16 }}>
-      <Navbar
-        user={user}
-        onlySaved={onlySaved}
-        onToggleOnlySaved={(v) => setOnlySaved(v)}
-        onSignIn={signIn}
-        onSignUp={signUp}
-        onSignOut={signOutNow}
-      />
-
-      {/* 검색 */}
-      <div style={{ marginBottom: 10 }}>
-        <input
+    <Container maxWidth="lg" sx={{ py: 2 }}>
+      {/* 검색 바 */}
+      <Paper variant="outlined" sx={{ p: 1.5, mt: 1.5, mb: 1.5 }}>
+        <TextField
           value={qText}
           onChange={(e) => setQText(e.target.value)}
-          placeholder="검색: 상품명/코드/태그/카테고리"
-          style={{
-            width: "100%",
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            padding: "8px 10px",
+          placeholder="검색: 상품명 / 코드 / 태그 / 카테고리"
+          fullWidth
+          size="small"
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchIcon fontSize="small" />
+              </InputAdornment>
+            ),
           }}
         />
-      </div>
+      </Paper>
 
       {/* 필터 바 */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "auto auto 1fr auto",
-          gap: 8,
-          alignItems: "center",
-          border: "1px solid #e5e7eb",
-          background: "#f9fafb",
-          borderRadius: 10,
-          padding: 10,
-          marginBottom: 12,
-        }}
-      >
-        {/* L1 */}
-        <select
-          value={fCatL1}
-          onChange={(e) => {
-            setFCatL1(e.target.value);
-            setFCatL2("");
-          }}
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            padding: "8px 10px",
-            minWidth: 220,
-          }}
-        >
-          <option value="">대분류(L1): 전체</option>
-          {Object.keys(CATEGORY_MAP).map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
+      <Card variant="outlined" sx={{ mb: 2 }}>
+        <CardContent>
+          <Grid container spacing={1.5} alignItems="center">
+            {/* L1 */}
+            <Grid item xs={12} sm={6} md={3}>
+              <TextField
+                select
+                label="대분류(L1)"
+                value={fCatL1}
+                onChange={(e) => {
+                  setFCatL1(e.target.value);
+                  setFCatL2("");
+                }}
+                fullWidth
+                size="small"
+                InputProps={{
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <CategoryIcon fontSize="small" />
+                    </InputAdornment>
+                  ),
+                }}
+              >
+                <MenuItem value="">전체</MenuItem>
+                {Object.keys(CATEGORY_MAP).map((k) => (
+                  <MenuItem key={k} value={k}>
+                    {k}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Grid>
 
-        {/* L2 */}
-        <select
-          value={fCatL2}
-          onChange={(e) => setFCatL2(e.target.value)}
-          disabled={!fCatL1}
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            padding: "8px 10px",
-            minWidth: 220,
-            opacity: fCatL1 ? 1 : 0.5,
-          }}
-        >
-          <option value="">{fCatL1 ? "중분류(L2): 전체" : "대분류 먼저 선택"}</option>
-          {l2Options.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+            {/* L2 */}
+            <Grid item xs={12} sm={6} md={3}>
+              <TextField
+                select
+                label="중분류(L2)"
+                value={fCatL2}
+                onChange={(e) => setFCatL2(e.target.value)}
+                fullWidth
+                size="small"
+                disabled={!fCatL1}
+                InputProps={{
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <LayersIcon fontSize="small" />
+                    </InputAdornment>
+                  ),
+                }}
+              >
+                <MenuItem value="">{fCatL1 ? "전체" : "대분류 먼저 선택"}</MenuItem>
+                {l2Options.map((s) => (
+                  <MenuItem key={s} value={s}>
+                    {s}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Grid>
 
-        {/* 태그 입력 */}
-        <input
-          value={fTag}
-          onChange={(e) => setFTag(e.target.value)}
-          placeholder="태그 필터 (쉼표/공백 구분: 전통, 봉투)"
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            padding: "8px 10px",
-            width: "100%",
-          }}
-        />
+            {/* 태그 */}
+            <Grid item xs={12} md={3}>
+              <TextField
+                value={fTag}
+                onChange={(e) => setFTag(e.target.value)}
+                placeholder="태그 필터 (쉼표/공백 구분: 전통, 봉투)"
+                fullWidth
+                size="small"
+                InputProps={{
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <LocalOfferIcon fontSize="small" />
+                    </InputAdornment>
+                  ),
+                }}
+              />
+            </Grid>
 
-        {/* 초기화 */}
-        <button
-          onClick={resetFilters}
-          style={{
-            borderRadius: 8,
-            padding: "8px 12px",
-            border: "1px solid #e5e7eb",
-            background: "white",
-          }}
-        >
-          필터 초기화
-        </button>
-      </div>
+            {/* ✅ 재입고 예정 제외 체크박스 */}
+            <Grid item xs={12} sm={6} md={2}>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={excludeRestock}
+                    onChange={(e) => setExcludeRestock(e.target.checked)}
+                    size="small"
+                  />
+                }
+                label="재입고 예정 제외"
+              />
+            </Grid>
+
+            {/* 초기화/적용 */}
+            <Grid item xs={12} sm={6} md={1.5}>
+              <Stack direction="row" spacing={1} justifyContent="flex-end">
+                <Tooltip title="필터 초기화">
+                  <span>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<RestartAltIcon />}
+                      onClick={resetFilters}
+                    >
+                      초기화
+                    </Button>
+                  </span>
+                </Tooltip>
+                <Tooltip title="필터 적용">
+                  <span>
+                    <Button variant="contained" size="small" startIcon={<FilterAltIcon />}>
+                      적용
+                    </Button>
+                  </span>
+                </Tooltip>
+              </Stack>
+            </Grid>
+          </Grid>
+        </CardContent>
+      </Card>
 
       {/* 태그 검색 결과 기반 카테고리 파셋(포함/제외) */}
       {fTag && tagFacetsL1.size > 0 && (
-        <div
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: 10,
-            padding: 10,
-            marginBottom: 10,
-            background: "#fff",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-            <strong>카테고리 파셋 (태그 결과 기준)</strong>
-            <label
-              style={{
-                marginLeft: "auto",
-                fontSize: 12,
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-              }}
-            >
-              모드:
-              <select
+        <Card variant="outlined" sx={{ mb: 2 }}>
+          <CardContent>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Typography variant="subtitle2">카테고리 파셋 (태그 결과 기준)</Typography>
+              <Box sx={{ flex: 1 }} />
+              <ToggleButtonGroup
+                size="small"
                 value={facetMode}
-                onChange={(e) => setFacetMode(e.target.value)}
-                style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: "2px 6px" }}
+                exclusive
+                onChange={(_, v) => v && setFacetMode(v)}
               >
-                <option value="include">포함</option>
-                <option value="exclude">제외</option>
-              </select>
-            </label>
-            <button
-              onClick={() => setFacetCatsL1(new Set())}
-              style={{ border: "1px solid #e5e7eb", background: "white", borderRadius: 8, padding: "4px 8px" }}
-              title="파셋 선택 해제"
-            >
-              선택 해제
-            </button>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {Array.from(tagFacetsL1.entries())
-              .sort((a, b) => b[1] - a[1]) // count desc
-              .map(([l1, cnt]) => {
-                const active = facetCatsL1.has(l1);
-                return (
-                  <button
-                    key={l1}
-                    onClick={() =>
-                      setFacetCatsL1((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(l1)) next.delete(l1);
-                        else next.add(l1);
-                        return next;
-                      })
-                    }
-                    style={{
-                      border: active ? "1px solid #111827" : "1px solid #e5e7eb",
-                      background: active ? (facetMode === "include" ? "#e0f2fe" : "#fee2e2") : "white",
-                      color: "#111827",
-                      borderRadius: 9999,
-                      padding: "4px 10px",
-                      fontSize: 12,
-                    }}
-                    title={`${l1} (${cnt.toLocaleString()}개)`}
-                  >
-                    {l1} · {cnt.toLocaleString()}
-                  </button>
-                );
-              })}
-          </div>
-          {facetCatsL1.size > 0 && (
-            <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>
-              적용: {facetMode === "include" ? "선택 카테고리만 표시" : "선택 카테고리 제외"} · 선택 {facetCatsL1.size}개
-            </div>
-          )}
-        </div>
+                <ToggleButton value="include">포함</ToggleButton>
+                <ToggleButton value="exclude">제외</ToggleButton>
+              </ToggleButtonGroup>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => setFacetCatsL1(new Set())}
+                sx={{ ml: 1 }}
+              >
+                선택 해제
+              </Button>
+            </Stack>
+
+            <Divider sx={{ my: 1 }} />
+
+            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+              {Array.from(tagFacetsL1.entries())
+                .sort((a, b) => b[1] - a[1])
+                .map(([l1, cnt]) => {
+                  const active = facetCatsL1.has(l1);
+                  return (
+                    <Chip
+                      key={l1}
+                      label={`${l1} · ${cnt.toLocaleString()}`}
+                      clickable
+                      variant={active ? "filled" : "outlined"}
+                      color={active ? (facetMode === "include" ? "info" : "error") : "default"}
+                      onClick={() =>
+                        setFacetCatsL1((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(l1)) next.delete(l1);
+                          else next.add(l1);
+                          return next;
+                        })
+                      }
+                    />
+                  );
+                })}
+            </Stack>
+
+            {facetCatsL1.size > 0 && (
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
+                적용: {facetMode === "include" ? "선택 카테고리만 표시" : "선택 카테고리 제외"} · 선택{" "}
+                {facetCatsL1.size}개
+              </Typography>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* 결과 정보 */}
-      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>
-        총 {items.length.toLocaleString()}개 / 표시 {filtered.length.toLocaleString()}개
-        {onlySaved && user ? " · 저장만 보기" : ""}
-        {fCatL1 ? ` · L1=${fCatL1}` : ""}
-        {fCatL2 ? ` · L2=${fCatL2}` : ""}
-        {fTag ? ` · 태그=${fTag}` : ""}
-        {qText ? ` · 검색="${qText}"` : ""}
-        {fTag && facetCatsL1.size > 0 ? ` · 파셋(${facetMode}): ${Array.from(facetCatsL1).join(", ")}` : ""}
-      </div>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        <Typography variant="body2" color="text.secondary">
+          총 {items.length.toLocaleString()}개 / 표시 {filtered.length.toLocaleString()}개
+        </Typography>
+        {onlySaved && user && <Chip size="small" label="저장만 보기" variant="outlined" />}
+        {fCatL1 && <Chip size="small" label={`L1=${fCatL1}`} />}
+        {fCatL2 && <Chip size="small" label={`L2=${fCatL2}`} />}
+        {fTag && <Chip size="small" label={`태그=${fTag}`} />}
+        {qText && <Chip size="small" label={`검색="${qText}"`} />}
+        {excludeRestock && <Chip size="small" color="default" variant="outlined" label="재입고 제외" />} {/* ✅ 요약 */}
+        {fTag && facetCatsL1.size > 0 && (
+          <Chip
+            size="small"
+            label={`파셋(${facetMode}): ${Array.from(facetCatsL1).join(", ")}`}
+          />
+        )}
+      </Stack>
 
+      {/* 리스트 */}
       {loading ? (
-        <div>불러오는 중…</div>
+        <Stack alignItems="center" sx={{ py: 6 }}>
+          <CircularProgress />
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+            불러오는 중…
+          </Typography>
+        </Stack>
       ) : filtered.length === 0 ? (
-        <div>검색/필터 결과가 없습니다.</div>
+        <Paper variant="outlined" sx={{ p: 4, textAlign: "center" }}>
+          <Typography color="text.secondary">검색/필터 결과가 없습니다.</Typography>
+        </Paper>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))",
-            gap: 12,
-          }}
-        >
+        <Grid container spacing={1.5}>
           {filtered.map((p) => (
-            <ProductCard
-              key={p.id}
-              product={p}
-              user={user}
-              isSaved={savedIds.has(p.id)}
-              restockPending={isRestockPending(p)}
-              onToggleSave={async (id) => {
-                try {
-                  await toggleSave(id);
-                } catch (e) {
-                  alert(e.message);
-                }
-              }}
-            />
+            <Grid item key={p.id} xs={6} sm={4} md={3} lg={3}>
+              {/* 반응형 그리드 분할값은 원하는 대로 조절 가능 */}
+              <ProductCard
+                product={p}
+                user={user}
+                isSaved={savedIds.has(p.id)}
+                restockPending={isRestockPending(p)}
+                onToggleSave={async (id) => {
+                  try {
+                    await toggleSave(id);
+                  } catch (e) {
+                    alert(e.message);
+                  }
+                }}
+              />
+            </Grid>
           ))}
-        </div>
+        </Grid>
       )}
-    </div>
+    </Container>
   );
 }

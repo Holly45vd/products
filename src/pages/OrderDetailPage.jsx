@@ -1,9 +1,55 @@
 // src/pages/OrderDetailPage.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { collection, doc, getDoc, updateDoc, deleteDoc } from "firebase/firestore";
-import { useNavigate, useParams } from "react-router-dom";
+import {
+  collection,
+  doc,
+  getDoc,
+  updateDoc,
+  deleteDoc,
+  addDoc,
+  serverTimestamp,
+} from "firebase/firestore";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { db } from "../firebase";
 import useSavedProducts from "../hooks/useSavedProducts";
+
+/* ================= MUI ================= */
+import {
+  AppBar,
+  Toolbar,
+  IconButton,
+  Typography,
+  Container,
+  Card,
+  CardContent,
+  Grid,
+  TextField,
+  InputAdornment,
+  Button,
+  Paper,
+  Table,
+  TableHead,
+  TableBody,
+  TableRow,
+  TableCell,
+  Stack,
+  Chip,
+  Divider,
+  CircularProgress,
+  Alert,
+  Snackbar,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Tooltip,
+  Box, // ✅ 누락 보완
+} from "@mui/material";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import DeleteIcon from "@mui/icons-material/Delete";
+import SaveIcon from "@mui/icons-material/Save";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 
 const fmtKRW = (n = 0) => Number(n || 0).toLocaleString("ko-KR");
 
@@ -11,6 +57,10 @@ export default function OrderDetailPage() {
   const { user, loadingUser } = useSavedProducts();
   const { orderId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // /orders/new 감지
+  const isNew = !orderId && location.pathname.endsWith("/orders/new");
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -22,11 +72,46 @@ export default function OrderDetailPage() {
   const [discountAmount, setDiscountAmount] = useState(0);
   const [items, setItems] = useState([]); // [{productId, name, price, qty, subtotal, ...}]
 
+  // UI state
+  const [snack, setSnack] = useState({ open: false, msg: "", severity: "success" });
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // 1) /orders/new 진입 시: 드래프트 생성 → 상세로 이동
   useEffect(() => {
-    if (!user) {
-      setLoading(false);
+    if (!user || !isNew) return;
+
+    (async () => {
+      try {
+        const payload = {
+          orderName: "새 주문서",
+          orderDate: new Date().toISOString().slice(0, 10),
+          discountAmount: 0,
+          totalQty: 0,
+          totalPrice: 0,
+          finalTotal: 0,
+          items: [],
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        const ref = await addDoc(collection(db, "users", user.uid, "orders"), payload);
+        navigate(`/orders/${ref.id}`, { replace: true, state: { created: true } });
+      } catch (e) {
+        console.error(e);
+        setErr(e?.message || "주문서 생성 실패");
+      }
+    })();
+  }, [user, isNew, navigate]);
+
+  // 2) 기존 주문 상세 로드
+  useEffect(() => {
+    if (!user || isNew) {
+      // isNew면 위 useEffect가 리다이렉트 처리
+      if (!user) setLoading(false);
       return;
     }
+
     (async () => {
       setErr("");
       setLoading(true);
@@ -48,7 +133,8 @@ export default function OrderDetailPage() {
             ...it,
             price: Number(it.price || 0),
             qty: Number(it.qty || 0),
-            subtotal: Number(it.subtotal || Number(it.price || 0) * Number(it.qty || 0)),
+            subtotal:
+              Number(it.subtotal || Number(it.price || 0) * Number(it.qty || 0)),
           }))
         );
       } catch (e) {
@@ -58,11 +144,14 @@ export default function OrderDetailPage() {
         setLoading(false);
       }
     })();
-  }, [user, orderId]);
+  }, [user, orderId, isNew]);
 
   const totals = useMemo(() => {
     const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
-    const totalPrice = items.reduce((s, it) => s + (Number(it.price || 0) * Number(it.qty || 0)), 0);
+    const totalPrice = items.reduce(
+      (s, it) => s + Number(it.price || 0) * Number(it.qty || 0),
+      0
+    );
     const discount = Math.max(0, Number(discountAmount) || 0);
     const finalTotal = Math.max(0, totalPrice - discount);
     return { totalQty, totalPrice, discount, finalTotal };
@@ -71,7 +160,7 @@ export default function OrderDetailPage() {
   const setQty = (idx, v) => {
     setItems((prev) => {
       const cp = [...prev];
-      let n = Number(v);
+      let n = Number(String(v).replace(/[^\d]/g, ""));
       if (!Number.isFinite(n) || n < 0) n = 0;
       if (n > 9999) n = 9999;
       cp[idx] = { ...cp[idx], qty: n, subtotal: n * Number(cp[idx].price || 0) };
@@ -85,13 +174,20 @@ export default function OrderDetailPage() {
 
   const handleSave = async () => {
     if (!user || !order) return;
-    // 아이템 0개면 저장 방지(권장)
     if (items.length === 0) {
-      alert("최소 1개 이상의 아이템이 필요합니다.");
+      setSnack({
+        open: true,
+        msg: "최소 1개 이상의 아이템이 필요합니다.",
+        severity: "warning",
+      });
       return;
     }
     if (!orderDate || Number.isNaN(new Date(orderDate).getTime())) {
-      alert("주문일이 올바르지 않습니다.");
+      setSnack({
+        open: true,
+        msg: "주문일이 올바르지 않습니다.",
+        severity: "warning",
+      });
       return;
     }
 
@@ -114,269 +210,344 @@ export default function OrderDetailPage() {
         categoryL2: it.categoryL2 || "",
         link: it.link || "",
       })),
-      // updatedAt을 기록하고 싶다면 rules/설계에 맞춰 serverTimestamp()를 서버에서 처리하는 컬렉션으로 이동하거나,
-      // 여기서 setDoc merge로 추가할 수 있음.
+      updatedAt: serverTimestamp(),
     };
 
     try {
+      setSaving(true);
       await updateDoc(doc(db, "users", user.uid, "orders", order.id), payload);
-      alert("저장 완료");
+      setSnack({ open: true, msg: "저장 완료", severity: "success" });
       navigate("/orders", { replace: true });
     } catch (e) {
       console.error(e);
-      alert(e?.message || "저장 실패");
+      setSnack({ open: true, msg: e?.message || "저장 실패", severity: "error" });
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleDeleteOrder = async () => {
     if (!user || !order) return;
-    if (!window.confirm("이 주문서를 삭제할까요? 되돌릴 수 없습니다.")) return;
+    setDeleting(true);
     try {
       await deleteDoc(doc(db, "users", user.uid, "orders", order.id));
-      alert("삭제 완료");
+      setSnack({ open: true, msg: "삭제 완료", severity: "success" });
       navigate("/orders", { replace: true });
     } catch (e) {
       console.error(e);
-      alert(e?.message || "삭제 실패");
+      setSnack({ open: true, msg: e?.message || "삭제 실패", severity: "error" });
+    } finally {
+      setDeleting(false);
+      setConfirmOpen(false);
     }
   };
 
+  /* ====== Guarded states ====== */
   if (!user) {
     return (
-      <div style={{ maxWidth: 960, margin: "40px auto", padding: 16 }}>
-        <h2>로그인 필요</h2>
-      </div>
+      <Container maxWidth="lg" sx={{ py: 4 }}>
+        <Alert severity="info">로그인이 필요합니다.</Alert>
+      </Container>
     );
   }
   if (loadingUser || loading) {
     return (
-      <div style={{ maxWidth: 960, margin: "40px auto", padding: 16 }}>
-        불러오는 중…
-      </div>
+      <Container
+        maxWidth="lg"
+        sx={{ py: 8, display: "flex", flexDirection: "column", alignItems: "center" }}
+      >
+        <CircularProgress />
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+          불러오는 중…
+        </Typography>
+      </Container>
     );
   }
   if (err) {
     return (
-      <div style={{ maxWidth: 960, margin: "40px auto", padding: 16, color: "#991b1b" }}>
-        {err}
-      </div>
+      <Container maxWidth="lg" sx={{ py: 4 }}>
+        <Alert severity="error">{err}</Alert>
+      </Container>
     );
   }
   if (!order) return null;
 
   return (
-    <div style={{ maxWidth: 1100, margin: "0 auto", padding: 16 }}>
-      <h2 style={{ marginTop: 0 }}>주문서 수정</h2>
-
-      {/* 상단 액션: 이름/날짜/할인 + 저장/삭제 */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1.4fr 1fr 1fr auto auto",
-          gap: 12,
-          alignItems: "center",
-          marginBottom: 12,
-        }}
+    <>
+      {/* 상단 앱바 */}
+      <AppBar
+        position="sticky"
+        color="transparent"
+        elevation={0}
+        sx={{ borderBottom: "1px solid", borderColor: "divider" }}
       >
-        <input
-          value={orderName}
-          onChange={(e) => setOrderName(e.target.value)}
-          placeholder="주문서 이름"
-          style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 10px" }}
-        />
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span>주문일</span>
-          <input
-            type="date"
-            value={orderDate}
-            onChange={(e) => setOrderDate(e.target.value)}
-            style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: "6px 8px" }}
-          />
-        </label>
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span>할인금액</span>
-          <input
-            inputMode="numeric"
-            value={discountAmount}
-            onChange={(e) => setDiscountAmount(e.target.value.replace(/[^\d]/g, ""))}
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 8,
-              padding: "6px 8px",
-              width: 140,
-              textAlign: "right",
-            }}
-            placeholder="0"
-          />
-        </label>
-        <button
-          onClick={handleSave}
-          disabled={items.length === 0}
-          style={{
-            borderRadius: 8,
-            padding: "8px 12px",
-            border: "1px solid #e5e7eb",
-            background: items.length ? "#111827" : "#9ca3af",
-            color: "#fff",
-            cursor: items.length ? "pointer" : "not-allowed",
-          }}
-        >
-          저장
-        </button>
-        <button
-          onClick={handleDeleteOrder}
-          style={{
-            border: "1px solid #fecaca",
-            background: "#fff",
-            color: "#b91c1c",
-            borderRadius: 8,
-            padding: "8px 12px",
-          }}
-        >
-          주문서 삭제
-        </button>
-      </div>
+        <Toolbar>
+          <Tooltip title="뒤로">
+            <IconButton edge="start" onClick={() => navigate(-1)}>
+              <ArrowBackIcon />
+            </IconButton>
+          </Tooltip>
+          <Typography variant="h6" sx={{ ml: 1, fontWeight: 700 }}>
+            주문서 수정
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ ml: "auto" }}>
+            <Button
+              variant="contained"
+              startIcon={<SaveIcon />}
+              onClick={handleSave}
+              disabled={items.length === 0 || saving}
+            >
+              {saving ? "저장중…" : "저장"}
+            </Button>
+            <Button
+              variant="outlined"
+              color="error"
+              startIcon={<DeleteIcon />}
+              onClick={() => setConfirmOpen(true)}
+            >
+              삭제
+            </Button>
+          </Stack>
+        </Toolbar>
+      </AppBar>
 
-      {/* 합계 */}
-      <div
-        style={{
-          display: "flex",
-          gap: 16,
-          alignItems: "center",
-          justifyContent: "flex-end",
-          marginBottom: 8,
-          color: "#374151",
-        }}
+      <Container maxWidth="lg" sx={{ py: 3 }}>
+        {/* 상단 폼 */}
+        <Card variant="outlined" sx={{ mb: 2 }}>
+          <CardContent>
+            <Grid container spacing={2} alignItems="center">
+              <Grid item xs={12} md={6}>
+                <TextField
+                  label="주문서 이름"
+                  value={orderName}
+                  onChange={(e) => setOrderName(e.target.value)}
+                  fullWidth
+                  size="small"
+                />
+              </Grid>
+              <Grid item xs={12} md={3}>
+                <TextField
+                  label="주문일"
+                  type="date"
+                  value={orderDate}
+                  onChange={(e) => setOrderDate(e.target.value)}
+                  fullWidth
+                  size="small"
+                  InputLabelProps={{ shrink: true }}
+                />
+              </Grid>
+              <Grid item xs={12} md={3}>
+                <TextField
+                  label="할인금액"
+                  value={discountAmount}
+                  onChange={(e) =>
+                    setDiscountAmount(String(e.target.value).replace(/[^\d]/g, ""))
+                  }
+                  fullWidth
+                  size="small"
+                  inputMode="numeric"
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">원</InputAdornment>,
+                    sx: { textAlign: "right" },
+                  }}
+                />
+              </Grid>
+            </Grid>
+          </CardContent>
+        </Card>
+
+        {/* 합계바 */}
+        <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            flexWrap="wrap"
+            justifyContent="flex-end"
+          >
+            <Chip label={`총 수량 ${totals.totalQty}개`} variant="outlined" />
+            <Divider flexItem orientation="vertical" sx={{ mx: 0.5 }} />
+            <Chip label={`상품합계 ${fmtKRW(totals.totalPrice)} 원`} />
+            <Chip
+              color="default"
+              variant="outlined"
+              label={`할인 -${fmtKRW(totals.discount)} 원`}
+            />
+            <Chip color="primary" label={`결제합계 ${fmtKRW(totals.finalTotal)} 원`} />
+          </Stack>
+        </Paper>
+
+        {/* 아이템 테이블 */}
+        <Paper variant="outlined">
+          <Table size="small">
+            <TableHead>
+              <TableRow sx={{ bgcolor: "grey.50" }}>
+                <TableCell>상품</TableCell>
+                <TableCell>코드</TableCell>
+                <TableCell align="right">가격</TableCell>
+                <TableCell align="center">수량</TableCell>
+                <TableCell align="right">소계</TableCell>
+                <TableCell align="center">원본/삭제</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {items.map((it, idx) => (
+                <TableRow key={it.productId} hover>
+                  <TableCell sx={{ minWidth: 280 }}>
+                    <Stack direction="row" spacing={1.5} alignItems="center">
+                      <Paper
+                        variant="outlined"
+                        sx={{
+                          width: 60,
+                          height: 60,
+                          borderRadius: 1,
+                          overflow: "hidden",
+                          bgcolor: "grey.100",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        {it.imageUrl ? (
+                          <img
+                            alt={it.name}
+                            src={it.imageUrl}
+                            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                          />
+                        ) : (
+                          <Typography variant="caption" color="text.secondary">
+                            No Image
+                          </Typography>
+                        )}
+                      </Paper>
+                      <Box>
+                        <Typography fontWeight={700} noWrap title={it.name}>
+                          {it.name}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {it.categoryL1 || "-"} {it.categoryL2 ? `> ${it.categoryL2}` : ""}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  </TableCell>
+
+                  <TableCell>
+                    <Typography variant="caption" color="text.secondary">
+                      {it.productCode || it.productId}
+                    </Typography>
+                  </TableCell>
+
+                  <TableCell align="right">{fmtKRW(it.price)} 원</TableCell>
+
+                  <TableCell align="center" sx={{ minWidth: 100 }}>
+                    <TextField
+                      value={it.qty}
+                      onChange={(e) => setQty(idx, e.target.value)}
+                      size="small"
+                      inputMode="numeric"
+                      sx={{ width: 82 }}
+                    />
+                  </TableCell>
+
+                  <TableCell align="right">
+                    <Typography fontWeight={700}>
+                      {fmtKRW(Number(it.price || 0) * Number(it.qty || 0))}
+                    </Typography>{" "}
+                    원
+                  </TableCell>
+
+                  <TableCell align="center" sx={{ whiteSpace: "nowrap" }}>
+                    {it.link ? (
+                      <Tooltip title="원본 열기">
+                        <IconButton
+                          size="small"
+                          component="a"
+                          href={it.link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          <OpenInNewIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    ) : (
+                      <Typography variant="caption" color="text.secondary">
+                        -
+                      </Typography>
+                    )}
+                    <Tooltip title="행 삭제">
+                      <span>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          color="error"
+                          onClick={() => handleRemoveRow(idx)}
+                          sx={{ ml: 1 }}
+                        >
+                          삭제
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+
+              {items.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={6} align="center">
+                    <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
+                      아이템이 없습니다. (상단에서 저장할 수 없습니다)
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </Paper>
+      </Container>
+
+      {/* 삭제 확인 다이얼로그 */}
+      <Dialog
+        open={confirmOpen}
+        onClose={() => (deleting ? null : setConfirmOpen(false))}
+        maxWidth="xs"
+        fullWidth
       >
-        <div>
-          총 수량 <strong>{totals.totalQty}</strong>개
-        </div>
-        <div>
-          상품합계 <strong>{fmtKRW(totals.totalPrice)}</strong> 원
-        </div>
-        <div>
-          할인 <strong>-{fmtKRW(totals.discount)}</strong> 원
-        </div>
-        <div>
-          결제합계 <strong>{fmtKRW(totals.finalTotal)}</strong> 원
-        </div>
-      </div>
+        <DialogTitle>주문서 삭제</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            이 주문서를 삭제합니다. 되돌릴 수 없습니다.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmOpen(false)} disabled={deleting}>
+            취소
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            startIcon={<DeleteIcon />}
+            onClick={handleDeleteOrder}
+            disabled={deleting}
+          >
+            {deleting ? "삭제중…" : "삭제"}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
-      {/* 테이블 */}
-      <div style={{ overflowX: "auto", border: "1px solid #e5e7eb", borderRadius: 10 }}>
-        <table style={{ borderCollapse: "collapse", width: "100%" }}>
-          <thead>
-            <tr style={{ background: "#f9fafb" }}>
-              <th style={th}>상품</th>
-              <th style={th}>코드</th>
-              <th style={thRight}>가격</th>
-              <th style={thCenter}>수량</th>
-              <th style={thRight}>소계</th>
-              <th style={thCenter}>원본/삭제</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((it, idx) => (
-              <tr key={it.productId} style={{ borderTop: "1px solid #f3f4f6" }}>
-                <td style={{ padding: 10, minWidth: 280 }}>
-                  <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                    <div
-                      style={{
-                        width: 60,
-                        height: 60,
-                        background: "#f3f4f6",
-                        borderRadius: 8,
-                        overflow: "hidden",
-                      }}
-                    >
-                      {it.imageUrl && (
-                        <img
-                          src={it.imageUrl}
-                          alt={it.name}
-                          style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                        />
-                      )}
-                    </div>
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{it.name}</div>
-                      <div style={{ fontSize: 12, color: "#6b7280" }}>
-                        {it.categoryL1 || "-"} {it.categoryL2 ? `> ${it.categoryL2}` : ""}
-                      </div>
-                    </div>
-                  </div>
-                </td>
-                <td style={{ padding: 10, fontSize: 12, color: "#6b7280" }}>
-                  {it.productCode || it.productId}
-                </td>
-                <td style={tdRight}>{fmtKRW(it.price)} 원</td>
-                <td style={{ padding: 10, textAlign: "center" }}>
-                  <input
-                    value={it.qty}
-                    onChange={(e) => setQty(idx, e.target.value)}
-                    inputMode="numeric"
-                    style={{
-                      width: 64,
-                      textAlign: "center",
-                      border: "1px solid #e5e7eb",
-                      borderRadius: 8,
-                      padding: "6px 8px",
-                    }}
-                  />
-                </td>
-                <td style={tdRight}>
-                  <strong>{fmtKRW(Number(it.price || 0) * Number(it.qty || 0))}</strong> 원
-                </td>
-                <td style={{ padding: 10, textAlign: "center", whiteSpace: "nowrap" }}>
-                  {it.link ? (
-                    <a
-                      href={it.link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ fontSize: 12 }}
-                    >
-                      열기
-                    </a>
-                  ) : (
-                    <span style={{ fontSize: 12, color: "#9ca3af" }}>-</span>
-                  )}
-                  <button
-                    onClick={() => handleRemoveRow(idx)}
-                    style={{
-                      marginLeft: 8,
-                      border: "1px solid #e5e7eb",
-                      background: "#fff",
-                      borderRadius: 8,
-                      padding: "6px 10px",
-                      cursor: "pointer",
-                      fontSize: 12,
-                    }}
-                    title="이 상품을 주문서에서 제거"
-                  >
-                    삭제
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {items.length === 0 && (
-              <tr>
-                <td colSpan={6} style={{ padding: 16, textAlign: "center", color: "#6b7280" }}>
-                  아이템이 없습니다. (상단에서 저장할 수 없습니다)
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+      {/* 스낵바 */}
+      <Snackbar
+        open={snack.open}
+        autoHideDuration={3000}
+        onClose={() => setSnack((s) => ({ ...s, open: false }))}
+      >
+        <Alert
+          severity={snack.severity}
+          onClose={() => setSnack((s) => ({ ...s, open: false }))}
+          sx={{ width: "100%" }}
+        >
+          {snack.msg}
+        </Alert>
+      </Snackbar>
+    </>
   );
 }
-
-const th = {
-  textAlign: "left",
-  padding: 10,
-  borderBottom: "1px solid #e5e7eb",
-  whiteSpace: "nowrap",
-};
-const thRight = { ...th, textAlign: "right" };
-const thCenter = { ...th, textAlign: "center" };
-const tdRight = { padding: 10, textAlign: "right" };

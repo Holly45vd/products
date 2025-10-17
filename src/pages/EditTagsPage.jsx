@@ -1,5 +1,5 @@
 // src/pages/EditTagsAndCategoriesPage.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   collection,
   getDocs,
@@ -10,10 +10,56 @@ import {
   arrayUnion,
   arrayRemove,
   serverTimestamp,
+  limit as fsLimit,
+  startAfter as fsStartAfter,
+  deleteDoc,
 } from "firebase/firestore";
 import { db } from "../firebase";
 
-/** ===== 카테고리 정의 (LNB 대분류 → 중분류 리스트) ===== */
+/* ================= MUI ================= */
+import {
+  AppBar,
+  Toolbar,
+  Typography,
+  Container,
+  Box,
+  Grid,
+  Card,
+  CardContent,
+  CardMedia,
+  Checkbox,
+  IconButton,
+  Button,
+  TextField,
+  InputAdornment,
+  Select,
+  MenuItem,
+  Chip,
+  Stack,
+  Divider,
+  Snackbar,
+  Alert,
+  CircularProgress,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Menu,
+  Tooltip,
+  FormControlLabel,
+} from "@mui/material";
+import SearchIcon from "@mui/icons-material/Search";
+import DeleteIcon from "@mui/icons-material/Delete";
+import MoreVertIcon from "@mui/icons-material/MoreVert";
+import DownloadIcon from "@mui/icons-material/Download";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import AddIcon from "@mui/icons-material/Add";
+import TagIcon from "@mui/icons-material/Sell";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import CategoryIcon from "@mui/icons-material/Category";
+
+/** ===== 카테고리 정의 ===== */
 const CATEGORY_MAP = {
   "청소/욕실": ["청소용품(세제/브러쉬)", "세탁용품(세탁망/건조대)", "욕실용품(발매트/수건)", "휴지통/분리수거"],
   "수납/정리": ["수납박스/바구니", "리빙박스/정리함", "틈새수납", "옷걸이/선반", "주방수납", "냉장고 정리"],
@@ -30,19 +76,20 @@ const CATEGORY_MAP = {
   "베스트/신상품": ["인기 순위 상품", "신상품"],
 };
 
-/** ===== 태그 토크나이저 ===== */
-function tokenizeTags(input = "") {
-  return String(input)
+/** ===== 유틸 ===== */
+const PAGE_SIZE = 120;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const tokenizeTags = (input = "") =>
+  String(input)
     .split(/[,|#/ ]+/)
     .map((s) => s.trim())
     .filter(Boolean);
-}
 
-/** ===== CSV 유틸 ===== */
-function csvEscape(v) {
+const csvEscape = (v) => {
   const s = v == null ? "" : String(v);
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
+};
 
 function buildCsv(rows) {
   const header = [
@@ -55,6 +102,8 @@ function buildCsv(rows) {
     "조회수",
     "태그",
     "링크",
+    "이미지URL",
+    "이미지여부(hasImage)",
     "대분류(categoryL1)",
     "중분류(categoryL2)",
   ];
@@ -71,6 +120,8 @@ function buildCsv(rows) {
         p.views ?? "",
         (p.tags || []).join(" | "),
         p.link || "",
+        p.imageUrl || "",
+        p.imageUrl ? "Y" : "N",
         p.categoryL1 || "",
         p.categoryL2 || "",
       ]
@@ -81,8 +132,7 @@ function buildCsv(rows) {
   return lines.join("\r\n");
 }
 
-/** ===== 텍스트 다운로드 (BOM 추가) ===== */
-function downloadText(content, filename, mime = "text/csv;charset=utf-8") {
+const downloadText = (content, filename, mime = "text/csv;charset=utf-8") => {
   const BOM = "\uFEFF";
   const blob = new Blob([BOM + content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -93,21 +143,37 @@ function downloadText(content, filename, mime = "text/csv;charset=utf-8") {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+};
+
+/* =============== 공통 확인 다이얼로그 =============== */
+function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmText = "확인", loading = false }) {
+  return (
+    <Dialog open={open} onClose={loading ? undefined : onCancel} maxWidth="xs" fullWidth>
+      <DialogTitle>{title}</DialogTitle>
+      <DialogContent>
+        <DialogContentText sx={{ whiteSpace: "pre-line" }}>{message}</DialogContentText>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onCancel} disabled={loading}>
+          취소
+        </Button>
+        <Button variant="contained" color="error" startIcon={<DeleteIcon />} onClick={onConfirm} disabled={loading}>
+          {loading ? "처리중…" : confirmText}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
 }
 
-/** =======================
- *  CSV 업서트 모달 컴포넌트
- * ======================= */
-function CsvImportModal({ open, onClose, onAfterImport }) {
+/* =============== CSV 업서트 모달(MUI 버전) =============== */
+const CsvImportModal = React.memo(function CsvImportModal({ open, onClose, onAfterImport }) {
   const [fileName, setFileName] = useState("");
   const [raw, setRaw] = useState("");
   const [rows, setRows] = useState([]); // string[][]
-  const [header, setHeader] = useState([]); // normalized keys
-  const [rawHeader, setRawHeader] = useState([]); // original
-
-  const [overwriteMode, setOverwriteMode] = useState(false); // set merge:false
-  const [replaceTags, setReplaceTags] = useState(true); // CSV tags 반영(교체)
-  const [replaceCategories, setReplaceCategories] = useState(true); // CSV cat 반영
+  const [header, setHeader] = useState([]); // normalized
+  const [overwriteMode, setOverwriteMode] = useState(false);
+  const [replaceTags, setReplaceTags] = useState(true);
+  const [replaceCategories, setReplaceCategories] = useState(true);
   const [progress, setProgress] = useState({ done: 0, total: 0, running: false });
 
   const parsedProducts = useMemo(() => {
@@ -115,9 +181,8 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
     return rows.map((r) => rowToProduct(r, header)).filter(Boolean);
   }, [rows, header]);
 
-  // --- CSV 파서/헤더 normalize/rowToProduct (모달 내부 전용) ---
-  function parseCsv(text) {
-    let src = text.replace(/^\uFEFF/, "");
+  const parseCsv = (text) => {
+    let src = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const sep = src.includes("\t") ? "\t" : ",";
     const out = [];
     let cur = [];
@@ -130,12 +195,10 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
         if (inQ && src[i + 1] === '"') {
           cell += '"';
           i++;
-        } else {
-          inQ = !inQ;
-        }
+        } else inQ = !inQ;
         continue;
       }
-      if (!inQ && (ch === sep || ch === "\n" || ch === "\r")) {
+      if (!inQ && (ch === sep || ch === "\n")) {
         cur.push(cell);
         cell = "";
         if (ch === "\n") {
@@ -149,34 +212,30 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
     cur.push(cell);
     if (cur.length) out.push(cur);
     return out.filter((r) => r.some((c) => String(c).trim() !== ""));
-  }
+  };
 
-  function normalizeHeader(h = "") {
+  const normalizeHeader = (h = "") => {
     const raw = String(h).trim();
-  const canon = raw
-    .toLowerCase()
-    .replace(/\s+/g, "")        // 공백 제거
-    .replace(/\([^)]*\)/g, ""); // ( ... ) 제거
+    const canon = raw.toLowerCase().replace(/\s+/g, "").replace(/\([^)]*\)/g, "");
+    if (["id", "상품id", "문서id"].includes(canon)) return "id";
+    if (["상품명", "name", "title"].includes(canon)) return "name";
+    if (["상품코드", "productcode", "code", "pdno"].includes(canon)) return "productCode";
+    if (["가격", "price"].includes(canon)) return "price";
+    if (["평점", "rating"].includes(canon)) return "rating";
+    if (["리뷰수", "review", "reviewcount"].includes(canon)) return "reviewCount";
+    if (["조회수", "views", "view"].includes(canon)) return "views";
+    if (["태그", "tags"].includes(canon)) return "tags";
+    if (["링크", "url", "link"].includes(canon)) return "link";
+    if (["이미지", "이미지url", "image", "imageurl", "thumbnail"].includes(canon)) return "imageUrl";
+    if (["재입고", "restock", "restockable"].includes(canon)) return "restockable";
+    if (["상태", "status"].includes(canon)) return "status";
+    if (["재고", "stock", "재고수량"].includes(canon)) return "stock";
+    if (/^(대분류|categoryl1|category_l1|lnb|lnb1)$/.test(canon)) return "categoryL1";
+    if (/^(중분류|categoryl2|category_l2|sub|lnb2)$/.test(canon)) return "categoryL2";
+    return raw;
+  };
 
-  if (["id","상품id","문서id"].includes(canon)) return "id";
-  if (["상품명","name","title"].includes(canon)) return "name";
-  if (["상품코드","productcode","code","pdno"].includes(canon)) return "productCode";
-  if (["가격","price"].includes(canon)) return "price";
-  if (["평점","rating"].includes(canon)) return "rating";
-  if (["리뷰수","review","reviewcount"].includes(canon)) return "reviewCount";
-  if (["조회수","views","view"].includes(canon)) return "views";
-  if (["태그","tags"].includes(canon)) return "tags";
-  if (["링크","url","link"].includes(canon)) return "link";
-  if (["이미지","이미지url","image","imageurl","thumbnail"].includes(canon)) return "imageUrl";
-  if (["재입고","restock","restockable"].includes(canon)) return "restockable";
-  if (["상태","status"].includes(canon)) return "status";
-  if (["재고","stock","재고수량"].includes(canon)) return "stock";
-  // 카테고리: 괄호/밑줄/공백/대소문자 허용
-  if (/^(대분류|categoryl1|category_l1|lnb|lnb1)$/.test(canon)) return "categoryL1";
-  if (/^(중분류|categoryl2|category_l2|sub|lnb2)$/.test(canon)) return "categoryL2";
-  return raw; // 디버깅 용이하게 원문 반환
-}
-  function parseKoreanCount(text = "") {
+  const parseKoreanCount = (text = "") => {
     const t = String(text).replace(/[\s,()보기]/g, "");
     if (!t) return 0;
     const mMan = t.match(/([\d.]+)\s*만/);
@@ -185,71 +244,46 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
     if (mCheon) return Math.round(parseFloat(mCheon[1]) * 1000);
     const num = t.match(/[\d.]+/);
     return num ? Number(num[0]) : 0;
-  }
-  function parsePrice(text = "") {
+  };
+
+  const parsePrice = (text = "") => {
     const n = String(text).replace(/[^\d.]/g, "");
     return n ? Number(n) : 0;
-  }
-  function clean(s = "") {
-    return String(s).replace(/\s+/g, " ").replace(/^"|"$/g, "").trim();
-  }
+  };
 
-  function rowToProduct(row, header) {
+  const clean = (s = "") => String(s).replace(/\s+/g, " ").replace(/^"|"$/g, "").trim();
+
+  const rowToProduct = (row, header) => {
     const obj = {};
-    header.forEach((key, idx) => {
-      obj[key] = row[idx] ?? "";
-    });
-
+    header.forEach((key, idx) => (obj[key] = row[idx] ?? ""));
     const id = clean(obj.id || obj.productCode || "");
     if (!id) return null;
 
     const product = { id };
-
     const fields = {
       name: clean(obj.name || ""),
       imageUrl: clean(obj.imageUrl || ""),
       link: clean(obj.link || ""),
       productCode: clean(obj.productCode || ""),
       price: obj.price !== undefined ? parsePrice(obj.price) : undefined,
-      rating:
-        obj.rating !== undefined
-          ? parseFloat(String(obj.rating).replace(/[^\d.]/g, "")) || 0
-          : undefined,
+      rating: obj.rating !== undefined ? parseFloat(String(obj.rating).replace(/[^\d.]/g, "")) || 0 : undefined,
       reviewCount: obj.reviewCount !== undefined ? parseKoreanCount(obj.reviewCount) : undefined,
       views: obj.views !== undefined ? parseKoreanCount(obj.views) : undefined,
-      restockable:
-        obj.restockable !== undefined ? /^(true|1|예|y)$/i.test(String(obj.restockable).trim()) : undefined,
+      restockable: obj.restockable !== undefined ? /^(true|1|예|y)$/i.test(String(obj.restockable).trim()) : undefined,
       status: obj.status ? String(obj.status).trim() : undefined,
       stock: obj.stock !== undefined ? Number(String(obj.stock).replace(/[^\d-]/g, "")) || 0 : undefined,
       categoryL1: obj.categoryL1 ? clean(obj.categoryL1) : undefined,
       categoryL2: obj.categoryL2 ? clean(obj.categoryL2) : undefined,
     };
-
     Object.entries(fields).forEach(([k, v]) => {
       if (v === undefined) return;
       if (typeof v === "string" && !v) return;
       product[k] = v;
     });
-
     if (obj.tags != null && String(obj.tags).trim() !== "") {
       product.tags = Array.from(new Set(tokenizeTags(String(obj.tags))));
     }
-
     return product;
-  }
-
-  function fmt(v) {
-    if (v == null) return "";
-    if (Array.isArray(v)) return v.join(" | ");
-    return String(v);
-  }
-
-  const onFile = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFileName(f.name);
-    const text = await f.text();
-    loadText(text);
   };
 
   const loadText = (text) => {
@@ -257,7 +291,6 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
     if (!grid.length) {
       setRows([]);
       setHeader([]);
-      setRawHeader([]);
       setRaw("");
       return;
     }
@@ -266,7 +299,14 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
     setRaw(text);
     setRows(body);
     setHeader(norm);
-    setRawHeader(h0);
+  };
+
+  const onFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFileName(f.name);
+    const text = await f.text();
+    loadText(text);
   };
 
   const downloadTemplate = () => {
@@ -300,187 +340,93 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
   };
 
   const handleImport = async () => {
-    if (!parsedProducts.length) {
-      alert("유효한 행이 없습니다.");
-      return;
-    }
+    if (!parsedProducts.length) return alert("유효한 행이 없습니다.");
     const total = parsedProducts.length;
     setProgress({ done: 0, total, running: true });
-
     try {
       const chunkSize = 400;
       for (let i = 0; i < parsedProducts.length; i += chunkSize) {
         const chunk = parsedProducts.slice(i, i + chunkSize);
         const batch = writeBatch(db);
-
         chunk.forEach((p) => {
           const { id, ...rest } = p;
-
           const payload = { updatedAt: serverTimestamp() };
-
-          // 필드 지정: overwriteMode 여부와 옵션에 따라 반영
-          // 태그
           if (replaceTags && rest.tags) payload.tags = rest.tags;
-
-          // 기본 필드들(카테고리 외)
           ["name", "imageUrl", "link", "productCode", "price", "rating", "reviewCount", "views", "restockable", "status", "stock"].forEach(
             (k) => {
               if (rest[k] !== undefined) payload[k] = rest[k];
             }
           );
-
-          // 카테고리
           if (replaceCategories) {
             if (rest.categoryL1 !== undefined) payload.categoryL1 = rest.categoryL1;
             if (rest.categoryL2 !== undefined) payload.categoryL2 = rest.categoryL2;
           }
-
-          const ref = doc(db, "products", id);
-          batch.set(ref, payload, { merge: !overwriteMode });
+          batch.set(doc(db, "products", id), payload, { merge: true });
         });
-
         await batch.commit();
         setProgress((s) => ({ ...s, done: Math.min(s.done + chunk.length, total) }));
+        await sleep(10);
       }
-
-      alert(
-        `완료: ${total}개 처리\n- 모드: ${overwriteMode ? "문서 덮어쓰기" : "필드 병합 업데이트"}\n- tags: ${
-          replaceTags ? "CSV값 반영/교체" : "CSV 무시(기존 유지)"
-        }\n- category: ${replaceCategories ? "CSV값 반영/교체" : "CSV 무시(기존 유지)"}`
-      );
       onAfterImport?.();
       onClose?.();
     } catch (e) {
-      console.error(e);
       alert(`에러: ${e.message}`);
     } finally {
       setProgress({ done: 0, total: 0, running: false });
     }
   };
 
-  if (!open) return null;
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.45)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 50,
-      }}
-      onClick={(e) => {
-        // 바깥 클릭 닫기
-        if (e.target === e.currentTarget) onClose?.();
-      }}
-    >
-      <div style={{ width: "min(1080px, 96%)", maxHeight: "90vh", overflow: "auto", background: "white", borderRadius: 12, padding: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>CSV 업서트(등록/업데이트)</h2>
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button
-              onClick={onClose}
-              style={{ border: "1px solid #e5e7eb", background: "white", borderRadius: 8, padding: "6px 10px", cursor: "pointer" }}
-            >
-              닫기
-            </button>
-          </div>
-        </div>
-
-        {/* 업로드/옵션 */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 12 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <input type="file" accept=".csv,text/csv" onChange={onFile} aria-label="CSV 파일 선택" />
-            <button
-              onClick={downloadTemplate}
-              style={{ borderRadius: 8, padding: "8px 12px", border: "1px solid #e5e7eb", background: "white", cursor: "pointer" }}
-            >
+    <Dialog open={open} onClose={progress.running ? undefined : onClose} maxWidth="lg" fullWidth>
+      <DialogTitle>CSV 업서트(등록/업데이트)</DialogTitle>
+      <DialogContent dividers>
+        <Stack spacing={2}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Button variant="outlined" component="label" startIcon={<CloudUploadIcon />}>
+              파일 선택
+              <input hidden type="file" accept=".csv,text/csv" onChange={onFile} />
+            </Button>
+            <Button variant="outlined" onClick={downloadTemplate}>
               템플릿 다운로드
-            </button>
-            <span style={{ fontSize: 12, color: "#6b7280" }}>
+            </Button>
+            <Typography variant="body2" color="text.secondary">
               {fileName ? `선택된 파일: ${fileName}` : "CSV(UTF-8, BOM 권장). 탭 구분도 OK"}
-            </span>
-          </div>
+            </Typography>
+          </Stack>
 
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <input type="checkbox" checked={overwriteMode} onChange={(e) => setOverwriteMode(e.target.checked)} />
-              문서 덮어쓰기(merge 아님)
-            </label>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <input type="checkbox" checked={replaceTags} onChange={(e) => setReplaceTags(e.target.checked)} />
-              CSV의 태그 반영(교체)
-            </label>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={replaceCategories}
-                onChange={(e) => setReplaceCategories(e.target.checked)}
-              />
-              CSV의 카테고리 반영(교체)
-            </label>
-            <button
-              onClick={handleImport}
-              disabled={!parsedProducts.length || progress.running}
-              style={{
-                borderRadius: 8,
-                padding: "8px 12px",
-                border: "1px solid #e5e7eb",
-                background: "#111827",
-                color: "white",
-                cursor: "pointer",
-                minWidth: 140,
-              }}
-            >
+          <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
+            <Chip
+              label={`문서 덮어쓰기: ${overwriteMode ? "ON" : "OFF"}`}
+              onClick={() => setOverwriteMode((v) => !v)}
+              variant={overwriteMode ? "filled" : "outlined"}
+            />
+            <Chip label={`태그 교체: ${replaceTags ? "ON" : "OFF"}`} onClick={() => setReplaceTags((v) => !v)} icon={<TagIcon />} variant={replaceTags ? "filled" : "outlined"} />
+            <Chip label={`카테고리 교체: ${replaceCategories ? "ON" : "OFF"}`} onClick={() => setReplaceCategories((v) => !v)} icon={<CategoryIcon />} variant={replaceCategories ? "filled" : "outlined"} />
+            <Button variant="contained" onClick={handleImport} disabled={!parsedProducts.length || progress.running}>
               {progress.running ? `처리중… (${progress.done}/${progress.total})` : `업서트 실행 (${parsedProducts.length}개)`}
-            </button>
-          </div>
-        </div>
+            </Button>
+          </Stack>
 
-        {/* 붙여넣기 입력 */}
-        <div style={{ marginBottom: 12 }}>
-          <textarea
+          <TextField
+            minRows={6}
+            maxRows={12}
+            multiline
+            placeholder={`여기에 CSV/TSV 붙여넣기\n예시: 상품ID,상품명,가격,태그,대분류(categoryL1),중분류(categoryL2)\n1038756,전통문양 봉투 2매입,1000,"전통 | 봉투 | 핑크",전통/시리즈,전통 시리즈`}
             value={raw}
-            onChange={(e) => loadText(e.target.value)}
-            placeholder={`여기에 CSV/TSV를 붙여넣어도 됩니다.\n예시:\n상품ID,상품명,가격,태그,대분류(categoryL1),중분류(categoryL2)\n1038756,전통문양 봉투 2매입,1000,"전통 | 봉투 | 핑크",전통/시리즈,전통 시리즈`}
-            style={{ width: "100%", height: 140, borderRadius: 8, border: "1px solid #e5e7eb", padding: 8 }}
+            onChange={(e) => setRaw(e.target.value)}
+            onBlur={() => raw && loadText(raw)}
+            fullWidth
           />
-        </div>
 
-        {/* 미리보기 */}
-        <h3 style={{ marginTop: 10, marginBottom: 8 }}>미리보기 ({parsedProducts.length}행)</h3>
-        {!parsedProducts.length ? (
-          <div style={{ color: "#6b7280" }}>파싱된 행이 없습니다.</div>
-        ) : (
-          <div style={{ overflowX: "auto", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+          <Divider />
+
+          <Typography variant="subtitle1">미리보기 ({parsedProducts.length}행)</Typography>
+          <Box sx={{ overflow: "auto", border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
             <table style={{ borderCollapse: "collapse", width: "100%" }}>
               <thead>
-                <tr style={{ background: "#f9fafb" }}>
-                  {[
-                    "id",
-                    "name",
-                    "productCode",
-                    "price",
-                    "rating",
-                    "reviewCount",
-                    "views",
-                    "tags",
-                    "link",
-                    "imageUrl",
-                    "restockable",
-                    "status",
-                    "stock",
-                    "categoryL1",
-                    "categoryL2",
-                  ].map((h) => (
-                    <th
-                      key={h}
-                      style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #e5e7eb", whiteSpace: "nowrap" }}
-                    >
+                <tr style={{ background: "#fafafa" }}>
+                  {["id", "name", "productCode", "price", "rating", "reviewCount", "views", "tags", "link", "imageUrl", "restockable", "status", "stock", "categoryL1", "categoryL2"].map((h) => (
+                    <th key={h} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #eee", whiteSpace: "nowrap" }}>
                       {h}
                     </th>
                   ))}
@@ -489,104 +435,145 @@ function CsvImportModal({ open, onClose, onAfterImport }) {
               <tbody>
                 {parsedProducts.slice(0, 200).map((p, i) => (
                   <tr key={i} style={{ borderTop: "1px solid #f3f4f6" }}>
-                    <td style={{ padding: 8 }}>{fmt(p.id)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.name)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.productCode)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.price)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.rating)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.reviewCount)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.views)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.tags)}</td>
-                    <td style={{ padding: 8, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {fmt(p.link)}
-                    </td>
-                    <td style={{ padding: 8, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {fmt(p.imageUrl)}
-                    </td>
-                    <td style={{ padding: 8 }}>{fmt(p.restockable)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.status)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.stock)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.categoryL1)}</td>
-                    <td style={{ padding: 8 }}>{fmt(p.categoryL2)}</td>
+                    <td style={{ padding: 8 }}>{p.id}</td>
+                    <td style={{ padding: 8 }}>{p.name || ""}</td>
+                    <td style={{ padding: 8 }}>{p.productCode || ""}</td>
+                    <td style={{ padding: 8 }}>{p.price ?? ""}</td>
+                    <td style={{ padding: 8 }}>{p.rating ?? ""}</td>
+                    <td style={{ padding: 8 }}>{p.reviewCount ?? ""}</td>
+                    <td style={{ padding: 8 }}>{p.views ?? ""}</td>
+                    <td style={{ padding: 8 }}>{Array.isArray(p.tags) ? p.tags.join(" | ") : ""}</td>
+                    <td style={{ padding: 8, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.link || ""}</td>
+                    <td style={{ padding: 8, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.imageUrl || ""}</td>
+                    <td style={{ padding: 8 }}>{p.restockable ?? ""}</td>
+                    <td style={{ padding: 8 }}>{p.status ?? ""}</td>
+                    <td style={{ padding: 8 }}>{p.stock ?? ""}</td>
+                    <td style={{ padding: 8 }}>{p.categoryL1 ?? ""}</td>
+                    <td style={{ padding: 8 }}>{p.categoryL2 ?? ""}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
             {parsedProducts.length > 200 && (
-              <div style={{ padding: 8, fontSize: 12, color: "#6b7280" }}>
-                미리보기는 상위 200행까지만 표시합니다. 전체 {parsedProducts.length}행 처리됩니다.
-              </div>
+              <Typography variant="caption" sx={{ p: 1, display: "block", color: "text.secondary" }}>
+                미리보기는 상위 200행까지만 표시. 전체 {parsedProducts.length}행 처리됨.
+              </Typography>
             )}
-          </div>
-        )}
-      </div>
-    </div>
+          </Box>
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} disabled={progress.running}>
+          닫기
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
-}
+});
 
-/** =======================
- *  메인 페이지
- * ======================= */
+/* ======================= 메인 페이지 ======================= */
 export default function EditTagsAndCategoriesPage() {
   const [items, setItems] = useState([]);
   const [qText, setQText] = useState("");
   const [loading, setLoading] = useState(true);
+  const [hasMore, setHasMore] = useState(true);
+  const lastDocRef = useRef(null);
 
-  // 선택 상태
   const [selected, setSelected] = useState(new Set());
-
-  // 태그 벌크 입력
   const [bulkInput, setBulkInput] = useState("");
   const [bulkWorking, setBulkWorking] = useState(false);
-
-  // 카테고리 벌크 입력
-  const [l1, setL1] = useState(""); // categoryL1
-  const [l2, setL2] = useState(""); // categoryL2
-
-  // CSV 모달
+  const [l1, setL1] = useState("");
+  const [l2, setL2] = useState("");
   const [csvOpen, setCsvOpen] = useState(false);
 
-  // 데이터 로드
-  const load = async () => {
-    setLoading(true);
-    try {
-      const qRef = query(collection(db, "products"), orderBy("updatedAt", "desc"));
-      const snap = await getDocs(qRef);
-      const rows = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() }))
-        .filter((p) => p && p.name);
-      setItems(rows);
-    } catch (e) {
-      console.error("load error", e);
-    } finally {
-      setLoading(false);
-    }
+  // 이미지 없는 상품만 보기
+  const [noImageOnly, setNoImageOnly] = useState(false);
+
+  // Snackbar
+  const [snack, setSnack] = useState({ open: false, msg: "", severity: "success" });
+
+  // Confirm (bulk delete / single delete)
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [confirmTargetIds, setConfirmTargetIds] = useState([]); // []=bulk, [id]=single
+
+  // per-item menu state
+  const [menuAnchor, setMenuAnchor] = useState(null);
+  const [menuTargetId, setMenuTargetId] = useState(null);
+
+  const openMenu = (e, id) => {
+    setMenuAnchor(e.currentTarget);
+    setMenuTargetId(id);
+  };
+  const closeMenu = () => {
+    setMenuAnchor(null);
+    setMenuTargetId(null);
   };
 
+  const loadPage = useCallback(
+    async (reset = false) => {
+      setLoading(true);
+      try {
+        let qRef = query(collection(db, "products"), orderBy("updatedAt", "desc"), fsLimit(PAGE_SIZE));
+        if (!reset && lastDocRef.current) {
+          qRef = query(collection(db, "products"), orderBy("updatedAt", "desc"), fsStartAfter(lastDocRef.current), fsLimit(PAGE_SIZE));
+        }
+        const snap = await getDocs(qRef);
+        const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((p) => p && p.name);
+
+        if (reset) {
+          setItems(rows);
+          setSelected(new Set());
+        } else {
+          setItems((prev) => [...prev, ...rows]);
+        }
+        if (snap.docs.length < PAGE_SIZE) {
+          setHasMore(false);
+        } else {
+          setHasMore(true);
+        }
+        lastDocRef.current = snap.docs[snap.docs.length - 1] || null;
+      } catch (e) {
+        setSnack({ open: true, msg: `불러오기 실패: ${e.message}`, severity: "error" });
+      } finally {
+        setLoading(false);
+      }
+    },
+    []
+  );
+
   useEffect(() => {
-    load();
-  }, []);
+    loadPage(true);
+  }, [loadPage]);
 
-  // 검색 필터
+  const reloadAll = useCallback(() => {
+    lastDocRef.current = null;
+    setHasMore(true);
+    loadPage(true);
+  }, [loadPage]);
+
+  // 디바운스 검색
+  const [debounced, setDebounced] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(qText.trim().toLowerCase()), 300);
+    return () => clearTimeout(t);
+  }, [qText]);
+
   const filtered = useMemo(() => {
-    const k = qText.trim().toLowerCase();
-    if (!k) return items;
-    return items.filter((p) => {
-      const hay = [
-        p.name,
-        p.productCode,
-        ...(p.tags || []),
-        p.categoryL1 || "",
-        p.categoryL2 || "",
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(k);
-    });
-  }, [items, qText]);
+    const base = items;
+    const searched = debounced
+      ? base.filter((p) => {
+          const hay = [p.name, p.productCode, ...(p.tags || []), p.categoryL1 || "", p.categoryL2 || ""]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          return hay.includes(debounced);
+        })
+      : base;
+    return searched.filter((p) => !noImageOnly || !p.imageUrl);
+  }, [items, debounced, noImageOnly]);
 
-  // 선택 토글/모두선택/해제
+  // 선택
   const toggleCheck = (id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -603,33 +590,22 @@ export default function EditTagsAndCategoriesPage() {
   };
   const clearSelection = () => setSelected(new Set());
 
-  /** ===== 태그 벌크 추가/삭제 ===== */
+  // 태그 벌크 추가/삭제
   const handleBulkAdd = async () => {
     const tokens = tokenizeTags(bulkInput);
-    if (!tokens.length) return alert("추가할 태그를 입력하세요.");
-    if (selected.size === 0) return alert("선택된 상품이 없습니다.");
+    if (!tokens.length) return setSnack({ open: true, msg: "추가할 태그를 입력하세요.", severity: "warning" });
+    if (selected.size === 0) return setSnack({ open: true, msg: "선택된 상품이 없습니다.", severity: "warning" });
 
     setBulkWorking(true);
     try {
       const batch = writeBatch(db);
-      selected.forEach((id) => {
-        const ref = doc(db, "products", id);
-        batch.update(ref, { tags: arrayUnion(...tokens), updatedAt: serverTimestamp() });
-      });
+      selected.forEach((id) => batch.update(doc(db, "products", id), { tags: arrayUnion(...tokens), updatedAt: serverTimestamp() }));
       await batch.commit();
-
-      // 로컬 갱신
-      setItems((prev) =>
-        prev.map((p) =>
-          selected.has(p.id)
-            ? { ...p, tags: Array.from(new Set([...(p.tags || []), ...tokens])) }
-            : p
-        )
-      );
+      setItems((prev) => prev.map((p) => (selected.has(p.id) ? { ...p, tags: Array.from(new Set([...(p.tags || []), ...tokens])) } : p)));
       setBulkInput("");
+      setSnack({ open: true, msg: `태그 추가 완료 (${selected.size}개)`, severity: "success" });
     } catch (e) {
-      console.error("bulk add error", e);
-      alert(`벌크 추가 실패: ${e.message}`);
+      setSnack({ open: true, msg: `벌크 추가 실패: ${e.message}`, severity: "error" });
     } finally {
       setBulkWorking(false);
     }
@@ -637,422 +613,342 @@ export default function EditTagsAndCategoriesPage() {
 
   const handleBulkRemove = async () => {
     const tokens = tokenizeTags(bulkInput);
-    if (!tokens.length) return alert("삭제할 태그를 입력하세요.");
-    if (selected.size === 0) return alert("선택된 상품이 없습니다.");
+    if (!tokens.length) return setSnack({ open: true, msg: "삭제할 태그를 입력하세요.", severity: "warning" });
+    if (selected.size === 0) return setSnack({ open: true, msg: "선택된 상품이 없습니다.", severity: "warning" });
+
     if (!window.confirm(`선택된 ${selected.size}개에서 [${tokens.join(", ")}] 태그를 제거할까요?`)) return;
 
     setBulkWorking(true);
     try {
       const batch = writeBatch(db);
-      selected.forEach((id) => {
-        const ref = doc(db, "products", id);
-        batch.update(ref, { tags: arrayRemove(...tokens), updatedAt: serverTimestamp() });
-      });
+      selected.forEach((id) => batch.update(doc(db, "products", id), { tags: arrayRemove(...tokens), updatedAt: serverTimestamp() }));
       await batch.commit();
-
-      setItems((prev) =>
-        prev.map((p) =>
-          selected.has(p.id)
-            ? { ...p, tags: (p.tags || []).filter((t) => !tokens.includes(t)) }
-            : p
-        )
-      );
+      setItems((prev) => prev.map((p) => (selected.has(p.id) ? { ...p, tags: (p.tags || []).filter((t) => !tokens.includes(t)) } : p)));
       setBulkInput("");
+      setSnack({ open: true, msg: `태그 삭제 완료 (${selected.size}개)`, severity: "success" });
     } catch (e) {
-      console.error("bulk remove error", e);
-      alert(`벌크 삭제 실패: ${e.message}`);
+      setSnack({ open: true, msg: `벌크 삭제 실패: ${e.message}`, severity: "error" });
     } finally {
       setBulkWorking(false);
     }
   };
 
-  /** ===== 카테고리 벌크 지정 ===== */
+  // 카테고리 벌크 지정
   const handleBulkSetCategory = async () => {
-    if (!l1) return alert("대분류(L1)를 선택하세요.");
-    if (!l2) return alert("중분류(L2)를 선택하세요.");
-    if (selected.size === 0) return alert("선택된 상품이 없습니다.");
+    if (!l1 || !l2) return setSnack({ open: true, msg: "대분류/중분류를 선택하세요.", severity: "warning" });
+    if (selected.size === 0) return setSnack({ open: true, msg: "선택된 상품이 없습니다.", severity: "warning" });
 
     if (!window.confirm(`선택된 ${selected.size}개 상품의 카테고리를\n${l1} > ${l2} 로 지정할까요?`)) return;
 
     setBulkWorking(true);
     try {
       const batch = writeBatch(db);
-      selected.forEach((id) => {
-        const ref = doc(db, "products", id);
-        batch.update(ref, {
-          categoryL1: l1,
-          categoryL2: l2,
-          updatedAt: serverTimestamp(),
-        });
-      });
+      selected.forEach((id) => batch.update(doc(db, "products", id), { categoryL1: l1, categoryL2: l2, updatedAt: serverTimestamp() }));
       await batch.commit();
-
-      // 로컬 반영
-      setItems((prev) =>
-        prev.map((p) => (selected.has(p.id) ? { ...p, categoryL1: l1, categoryL2: l2 } : p))
-      );
+      setItems((prev) => prev.map((p) => (selected.has(p.id) ? { ...p, categoryL1: l1, categoryL2: l2 } : p)));
+      setSnack({ open: true, msg: `카테고리 지정 완료 (${selected.size}개)`, severity: "success" });
     } catch (e) {
-      console.error("bulk category error", e);
-      alert(`카테고리 지정 실패: ${e.message}`);
+      setSnack({ open: true, msg: `카테고리 지정 실패: ${e.message}`, severity: "error" });
     } finally {
       setBulkWorking(false);
     }
   };
 
-  /** ===== CSV 내보내기 ===== */
+  // CSV
   const downloadCsv = (onlySelected = false) => {
     const list = onlySelected ? filtered.filter((p) => selected.has(p.id)) : filtered;
-    if (list.length === 0) return alert("내보낼 항목이 없습니다.");
+    if (list.length === 0) return setSnack({ open: true, msg: "내보낼 항목이 없습니다.", severity: "warning" });
     const csv = buildCsv(list);
     const today = new Date().toISOString().slice(0, 10);
-    const suffix = onlySelected ? "_선택만" : "_필터결과";
-    downloadText(csv, `상품리스트${suffix}_${today}.csv`, "text/csv;charset=utf-8");
+    downloadText(csv, `상품리스트_${onlySelected ? "선택만" : "필터결과"}_${today}.csv`);
   };
 
-  // 중분류 옵션
-  const l2Options = l1 ? CATEGORY_MAP[l1] || [] : [];
+  // 삭제 (개별/다중 공용)
+  const requestDelete = (ids) => {
+    setConfirmTargetIds(ids);
+    setConfirmOpen(true);
+    closeMenu();
+  };
+
+  const doDelete = async () => {
+    setConfirmLoading(true);
+    try {
+      if (confirmTargetIds.length === 1) {
+        await deleteDoc(doc(db, "products", confirmTargetIds[0]));
+      } else {
+        // 대량 삭제: batch(최대 500). 안전하게 400으로 분할
+        const ids = [...confirmTargetIds];
+        const CHUNK = 400;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const chunk = ids.slice(i, i + CHUNK);
+          const batch = writeBatch(db);
+          chunk.forEach((id) => batch.delete(doc(db, "products", id)));
+          await batch.commit();
+        }
+      }
+      setItems((prev) => prev.filter((p) => !confirmTargetIds.includes(p.id)));
+      setSelected((prev) => {
+        const next = new Set(prev);
+        confirmTargetIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      setSnack({ open: true, msg: `삭제 완료 (${confirmTargetIds.length}개)`, severity: "success" });
+    } catch (e) {
+      setSnack({ open: true, msg: `삭제 실패: ${e.message}`, severity: "error" });
+    } finally {
+      setConfirmLoading(false);
+      setConfirmOpen(false);
+      setConfirmTargetIds([]);
+    }
+  };
+
+  const l2Options = useMemo(() => (l1 ? CATEGORY_MAP[l1] || [] : []), [l1]);
 
   return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: 16 }}>
-      <h1 style={{ margin: 0, marginBottom: 12, fontSize: 22, fontWeight: 700 }}>
-        상품 태그/카테고리 편집
-      </h1>
+    <>
+      {/* 상단 앱바 */}
+      <AppBar position="sticky" elevation={0} color="transparent" sx={{ borderBottom: "1px solid", borderColor: "divider" }}>
+        <Toolbar sx={{ gap: 2, flexWrap: "wrap" }}>
+          <Typography variant="h6" sx={{ fontWeight: 700 }}>
+            상품 태그/카테고리 편집
+          </Typography>
+          <Box sx={{ flex: 1 }} />
+          <TextField
+            value={qText}
+            onChange={(e) => setQText(e.target.value)}
+            placeholder="검색: 상품명 / 상품코드 / 태그 / 카테고리"
+            size="small"
+            sx={{ minWidth: 340 }}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" />
+                </InputAdornment>
+              ),
+            }}
+          />
+          <Tooltip title="전체 새로고침">
+            <span>
+              <IconButton onClick={reloadAll} disabled={loading}>
+                <RefreshIcon />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Button variant="contained" startIcon={<CloudUploadIcon />} onClick={() => setCsvOpen(true)}>
+            CSV 업서트
+          </Button>
+          <Button variant="outlined" startIcon={<DownloadIcon />} onClick={() => downloadCsv(false)}>
+            CSV(필터결과)
+          </Button>
+          <Button variant="outlined" startIcon={<DownloadIcon />} onClick={() => downloadCsv(true)} disabled={selected.size === 0}>
+            CSV(선택만)
+          </Button>
+        </Toolbar>
+      </AppBar>
 
-      {/* 상단 툴바 */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginBottom: 12 }}>
-        <input
-          value={qText}
-          onChange={(e) => setQText(e.target.value)}
-          placeholder="검색: 상품명 / 상품코드 / 태그 / 카테고리"
-          style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 10px" }}
-        />
+      <Container maxWidth="lg" sx={{ py: 3 }}>
+        {/* 선택/벌크 툴바 */}
+        <Card variant="outlined" sx={{ mb: 2 }}>
+          <CardContent>
+            <Grid container spacing={2} alignItems="center">
+              <Grid item xs={12} md={4}>
+                <TextField
+                  value={bulkInput}
+                  onChange={(e) => setBulkInput(e.target.value)}
+                  placeholder="태그 입력: 전통, 핑크 #봉투"
+                  size="small"
+                  fullWidth
+                  InputProps={{ startAdornment: <InputAdornment position="start"><TagIcon fontSize="small" /></InputAdornment> }}
+                />
+              </Grid>
+              <Grid item>
+                <Button variant="contained" onClick={handleBulkAdd} disabled={bulkWorking || selected.size === 0} startIcon={<AddIcon />}>
+                  태그 추가({selected.size})
+                </Button>
+              </Grid>
+              <Grid item>
+                <Button variant="outlined" onClick={handleBulkRemove} disabled={bulkWorking || selected.size === 0}>
+                  태그 삭제({selected.size})
+                </Button>
+              </Grid>
+              <Grid item>
+                <Divider orientation="vertical" flexItem />
+              </Grid>
+              <Grid item xs={12} md={3}>
+                <Select size="small" value={l1} onChange={(e) => { setL1(e.target.value); setL2(""); }} displayEmpty fullWidth>
+                  <MenuItem value="">
+                    <em>대분류(L1)</em>
+                  </MenuItem>
+                  {Object.keys(CATEGORY_MAP).map((k) => (
+                    <MenuItem key={k} value={k}>
+                      {k}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </Grid>
+              <Grid item xs={12} md={3}>
+                <Select size="small" value={l2} onChange={(e) => setL2(e.target.value)} displayEmpty fullWidth disabled={!l1}>
+                  <MenuItem value="">
+                    <em>{l1 ? "중분류(L2)" : "대분류 먼저 선택"}</em>
+                  </MenuItem>
+                  {l2Options.map((k) => (
+                    <MenuItem key={k} value={k}>
+                      {k}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </Grid>
+              <Grid item>
+                <Button variant="contained" color="primary" onClick={handleBulkSetCategory} disabled={bulkWorking || selected.size === 0 || !l1 || !l2} startIcon={<CategoryIcon />}>
+                  카테고리 지정({selected.size})
+                </Button>
+              </Grid>
+              <Grid item>
+                <Button variant="outlined" onClick={selectAllOnPage}>
+                  전체선택
+                </Button>
+              </Grid>
+              <Grid item>
+                <Button variant="outlined" onClick={clearSelection}>
+                  선택해제
+                </Button>
+              </Grid>
+              <Grid item sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                <Button
+                  variant="outlined"
+                  color="error"
+                  startIcon={<DeleteIcon />}
+                  disabled={selected.size === 0}
+                  onClick={() => requestDelete([...selected])}
+                  title="선택 항목 삭제"
+                >
+                  선택 삭제
+                </Button>
+                <FormControlLabel
+                  control={<Checkbox checked={noImageOnly} onChange={(e) => setNoImageOnly(e.target.checked)} size="small" />}
+                  label="이미지 없는 상품만"
+                />
+              </Grid>
+            </Grid>
+          </CardContent>
+        </Card>
 
-        {/* 벌크 툴바 */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1.2fr auto auto auto auto auto auto auto",
-            gap: 8,
-            alignItems: "center",
+        {/* 리스트 */}
+        {loading && items.length === 0 ? (
+          <Stack alignItems="center" sx={{ py: 6 }}>
+            <CircularProgress />
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+              불러오는 중…
+            </Typography>
+          </Stack>
+        ) : filtered.length === 0 ? (
+          <Typography color="text.secondary">검색 결과가 없습니다.</Typography>
+        ) : (
+          <Grid container spacing={1.5}>
+            {filtered.map((p) => {
+              const isChecked = selected.has(p.id);
+              const uniqTags = Array.from(new Set(p.tags || []));
+              return (
+                <Grid item xs={12} key={p.id}>
+                  <Card variant="outlined">
+                    <CardContent sx={{ display: "grid", gridTemplateColumns: "36px 88px 1fr 36px", gap: 12, alignItems: "center" }}>
+                      <Checkbox checked={isChecked} onChange={() => toggleCheck(p.id)} inputProps={{ "aria-label": `select-${p.name}` }} />
+                      {p.imageUrl ? (
+                        <CardMedia component="img" image={p.imageUrl} alt={p.name} sx={{ width: 80, height: 80, borderRadius: 1, bgcolor: "grey.100", objectFit: "cover" }} />
+                      ) : (
+                        <Box sx={{ width: 80, height: 80, borderRadius: 1, bgcolor: "grey.100" }} />
+                      )}
+                      <Box>
+                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                          <Typography fontWeight={700}>{p.name}</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            ({p.productCode || p.id})
+                          </Typography>
+                          {p.link && (
+                            <Button size="small" href={p.link} target="_blank" rel="noopener noreferrer">
+                              원본 링크
+                            </Button>
+                          )}
+                          {isChecked && <Chip label="선택됨" size="small" color="default" variant="outlined" sx={{ ml: "auto" }} />}
+                        </Stack>
+
+                        <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5, flexWrap: "wrap" }}>
+                          {p.categoryL1 || p.categoryL2 ? (
+                            <>
+                              <Chip size="small" label={`L1: ${p.categoryL1 || "-"}`} color="primary" variant="outlined" />
+                              <Chip size="small" label={`L2: ${p.categoryL2 || "-"}`} color="info" variant="outlined" />
+                            </>
+                          ) : (
+                            <Typography variant="caption" color="text.secondary">
+                              카테고리 미지정
+                            </Typography>
+                          )}
+                        </Stack>
+
+                        <Stack direction="row" spacing={0.5} sx={{ mt: 0.5, flexWrap: "wrap" }}>
+                          {uniqTags.length > 0 ? uniqTags.map((t) => <Chip key={t} label={`#${t}`} size="small" variant="outlined" />) : <Typography variant="caption" color="text.secondary">태그 없음</Typography>}
+                        </Stack>
+                      </Box>
+
+                      {/* per-item menu */}
+                      <Box sx={{ display: "flex", justifyContent: "center" }}>
+                        <IconButton aria-label="more" onClick={(e) => openMenu(e, p.id)}>
+                          <MoreVertIcon />
+                        </IconButton>
+                      </Box>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              );
+            })}
+          </Grid>
+        )}
+
+        {/* 페이지네이션 */}
+        <Stack alignItems="center" sx={{ mt: 2 }}>
+          {hasMore ? (
+            <Button variant="contained" onClick={() => loadPage(false)} disabled={loading} sx={{ minWidth: 200 }}>
+              {loading ? "불러오는 중…" : "더 불러오기"}
+            </Button>
+          ) : (
+            <Typography variant="caption" color="text.secondary">
+              모든 항목을 불러왔습니다.
+            </Typography>
+          )}
+        </Stack>
+      </Container>
+
+      {/* CSV 모달 */}
+      <CsvImportModal open={csvOpen} onClose={() => setCsvOpen(false)} onAfterImport={() => reloadAll()} />
+
+      {/* per-item 메뉴 */}
+      <Menu anchorEl={menuAnchor} open={Boolean(menuAnchor)} onClose={closeMenu}>
+        <MenuItem
+          onClick={() => {
+            requestDelete([menuTargetId]);
           }}
         >
-          {/* 태그 입력 */}
-          <input
-            value={bulkInput}
-            onChange={(e) => setBulkInput(e.target.value)}
-            placeholder="태그 입력: 전통, 핑크 #봉투"
-            style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 10px" }}
-          />
-          <button
-            onClick={handleBulkAdd}
-            disabled={bulkWorking || selected.size === 0}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "#111827",
-              color: "white",
-              cursor: "pointer",
-              minWidth: 120,
-            }}
-          >
-            {bulkWorking ? "처리중…" : `선택 ${selected.size}개 태그추가`}
-          </button>
-          <button
-            onClick={handleBulkRemove}
-            disabled={bulkWorking || selected.size === 0}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "white",
-              cursor: "pointer",
-              minWidth: 120,
-            }}
-          >
-            선택 {selected.size}개 태그삭제
-          </button> <br />
+          <DeleteIcon fontSize="small" style={{ marginRight: 8 }} /> 삭제
+        </MenuItem>
+      </Menu>
 
-          {/* 카테고리 선택 */}
-          <select
-            value={l1}
-            onChange={(e) => {
-              setL1(e.target.value);
-              setL2(""); // L1 변경 시 L2 초기화
-            }}
-            style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 10px" }}
-            aria-label="대분류 선택"
-          >
-            <option value="">대분류(L1)</option>
-            {Object.keys(CATEGORY_MAP).map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </select>
-          <select
-            value={l2}
-            onChange={(e) => setL2(e.target.value)}
-            style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 10px" }}
-            aria-label="중분류 선택"
-            disabled={!l1}
-          >
-            <option value="">{l1 ? "중분류(L2)" : "대분류 먼저 선택"}</option>
-            {l2Options.map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={handleBulkSetCategory}
-            disabled={bulkWorking || selected.size === 0 || !l1 || !l2}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "#111827",
-              color: "white",
-              cursor: "pointer",
-              minWidth: 150,
-            }}
-            title="선택 항목 카테고리 지정"
-          >
-            선택 {selected.size}개 카테고리 지정
-          </button>
-
-          {/* 선택 컨트롤 */}
-          <button
-            onClick={selectAllOnPage}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "white",
-              cursor: "pointer",
-            }}
-            title="현재 검색 결과 모두 선택"
-          >
-            전체선택
-          </button>
-          <button
-            onClick={clearSelection}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "white",
-              cursor: "pointer",
-            }}
-            title="선택 해제"
-          >
-            선택해제
-          </button>
-
-          {/* CSV */}
-          <button
-            onClick={() => downloadCsv(false)}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "#111827",
-              color: "white",
-              cursor: "pointer",
-              minWidth: 120,
-            }}
-            title="현재 검색/필터된 목록 CSV 저장"
-          >
-            CSV(필터결과)
-          </button>
-          <button
-            onClick={() => downloadCsv(true)}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "white",
-              cursor: "pointer",
-              minWidth: 120,
-            }}
-            title="체크된 항목만 CSV 저장"
-          >
-            CSV(선택만)
-          </button>
-        </div>
-
-        {/* CSV 업서트 모달 열기 */}
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={() => setCsvOpen(true)}
-            style={{
-              borderRadius: 8,
-              padding: "8px 12px",
-              border: "1px solid #e5e7eb",
-              background: "#111827",
-              color: "white",
-              cursor: "pointer",
-            }}
-          >
-            CSV 업서트 열기
-          </button>
-          <span style={{ fontSize: 12, color: "#6b7280" }}>
-            모달에서 categoryL1 / categoryL2 컬럼을 인식합니다.
-          </span>
-        </div>
-      </div>
-
-      {loading ? (
-        <div>불러오는 중…</div>
-      ) : filtered.length === 0 ? (
-        <div>검색 결과가 없습니다.</div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
-          {filtered.map((p) => {
-            const isChecked = selected.has(p.id);
-            const uniqTags = Array.from(new Set(p.tags || []));
-            return (
-              <div
-                key={p.id}
-                style={{
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 10,
-                  padding: 10,
-                  display: "grid",
-                  gridTemplateColumns: "28px 80px 1fr",
-                  gap: 12,
-                  alignItems: "center",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={isChecked}
-                  onChange={() => toggleCheck(p.id)}
-                  style={{ width: 18, height: 18 }}
-                  aria-label={`상품 선택: ${p.name}`}
-                />
-
-                <div
-                  style={{
-                    width: 80,
-                    height: 80,
-                    borderRadius: 8,
-                    background: "#f3f4f6",
-                    overflow: "hidden",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  {p.imageUrl ? (
-                    <img
-                      src={p.imageUrl}
-                      alt={p.name}
-                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                    />
-                  ) : (
-                    <span style={{ color: "#9ca3af", fontSize: 12 }}>No Image</span>
-                  )}
-                </div>
-
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <strong>{p.name}</strong>
-                    <span style={{ fontSize: 12, color: "#6b7280" }}>({p.productCode || p.id})</span>
-                    {p.link && (
-                      <a
-                        href={p.link}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{ fontSize: 12 }}
-                      >
-                        원본 링크
-                      </a>
-                    )}
-                    {isChecked && (
-                      <span style={{ fontSize: 11, color: "#111827", marginLeft: "auto" }}>
-                        선택됨
-                      </span>
-                    )}
-                  </div>
-
-                  {/* 카테고리 표시 */}
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {(p.categoryL1 || p.categoryL2) ? (
-                      <>
-                        <span
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 6,
-                            fontSize: 12,
-                            background: "#eef2ff",
-                            border: "1px solid #e5e7eb",
-                            padding: "2px 8px",
-                            borderRadius: 9999,
-                          }}
-                          title="대분류"
-                        >
-                          L1: {p.categoryL1 || "-"}
-                        </span>
-                        <span
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 6,
-                            fontSize: 12,
-                            background: "#ecfeff",
-                            border: "1px solid #e5e7eb",
-                            padding: "2px 8px",
-                            borderRadius: 9999,
-                          }}
-                          title="중분류"
-                        >
-                          L2: {p.categoryL2 || "-"}
-                        </span>
-                      </>
-                    ) : (
-                      <span style={{ color: "#9ca3af", fontSize: 12 }}>카테고리 미지정</span>
-                    )}
-                  </div>
-
-                  {/* 태그 표시 */}
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {uniqTags.length === 0 ? (
-                      <span style={{ color: "#9ca3af", fontSize: 12 }}>태그 없음</span>
-                    ) : (
-                      uniqTags.map((t) => (
-                        <span
-                          key={t}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 6,
-                            fontSize: 12,
-                            background: "#f3f4f6",
-                            border: "1px solid #e5e7eb",
-                            padding: "2px 8px",
-                            borderRadius: 9999,
-                          }}
-                        >
-                          #{t}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* CSV 업서트 모달 */}
-      <CsvImportModal
-        open={csvOpen}
-        onClose={() => setCsvOpen(false)}
-        onAfterImport={() => load()}
+      {/* 삭제 확인 */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="삭제 확인"
+        message={confirmTargetIds.length > 1 ? `선택된 ${confirmTargetIds.length}개 항목을 삭제합니다.\n이 작업은 되돌릴 수 없습니다.` : "이 상품을 삭제합니다. 되돌릴 수 없습니다."}
+        confirmText="삭제"
+        onCancel={() => !confirmLoading && setConfirmOpen(false)}
+        onConfirm={doDelete}
+        loading={confirmLoading}
       />
-    </div>
+
+      {/* 스낵바 */}
+      <Snackbar open={snack.open} autoHideDuration={3000} onClose={() => setSnack((s) => ({ ...s, open: false }))}>
+        <Alert severity={snack.severity} onClose={() => setSnack((s) => ({ ...s, open: false }))} sx={{ width: "100%" }}>
+          {snack.msg}
+        </Alert>
+      </Snackbar>
+    </>
   );
 }
