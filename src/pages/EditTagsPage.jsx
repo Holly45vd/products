@@ -176,6 +176,8 @@ const CsvImportModal = React.memo(function CsvImportModal({ open, onClose, onAft
   const [replaceCategories, setReplaceCategories] = useState(true);
   const [progress, setProgress] = useState({ done: 0, total: 0, running: false });
 
+  const fileRef = useRef(null); // ⬅️ 파일 선택 강제 오픈용 ref
+
   const parsedProducts = useMemo(() => {
     if (!rows.length) return [];
     return rows.map((r) => rowToProduct(r, header)).filter(Boolean);
@@ -381,18 +383,56 @@ const CsvImportModal = React.memo(function CsvImportModal({ open, onClose, onAft
       <DialogTitle>CSV 업서트(등록/업데이트)</DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2}>
+          {/* 파일 선택 (ref.click 방식) */}
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-            <Button variant="outlined" component="label" startIcon={<CloudUploadIcon />}>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,.tsv,text/csv,text/tab-separated-values"
+              style={{ display: "none" }}
+              onChange={onFile}
+            />
+            <Button
+              variant="outlined"
+              startIcon={<CloudUploadIcon />}
+              onClick={() => {
+                if (fileRef.current) fileRef.current.value = ""; // 같은 파일 재선택 이슈 방지
+                fileRef.current?.click();
+              }}
+            >
               파일 선택
-              <input hidden type="file" accept=".csv,text/csv" onChange={onFile} />
             </Button>
             <Button variant="outlined" onClick={downloadTemplate}>
               템플릿 다운로드
             </Button>
             <Typography variant="body2" color="text.secondary">
-              {fileName ? `선택된 파일: ${fileName}` : "CSV(UTF-8, BOM 권장). 탭 구분도 OK"}
+              {fileName ? `선택된 파일: ${fileName}` : "CSV/TSV 지원 (UTF-8, BOM 권장)"}
             </Typography>
           </Stack>
+
+          {/* 드래그앤드롭 보조 입력 */}
+          <Box
+            sx={{
+              p: 2,
+              border: "1px dashed",
+              borderColor: "divider",
+              borderRadius: 1,
+              textAlign: "center",
+              bgcolor: "background.default",
+              userSelect: "none",
+            }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={async (e) => {
+              e.preventDefault();
+              const f = e.dataTransfer?.files?.[0];
+              if (!f) return;
+              setFileName(f.name);
+              const text = await f.text();
+              loadText(text);
+            }}
+          >
+            여기로 CSV/TSV 파일을 드래그해서 놓아도 됩니다.
+          </Box>
 
           <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
             <Chip
@@ -407,14 +447,18 @@ const CsvImportModal = React.memo(function CsvImportModal({ open, onClose, onAft
             </Button>
           </Stack>
 
+          {/* 붙여넣기 → 즉시 파싱 */}
           <TextField
             minRows={6}
             maxRows={12}
             multiline
             placeholder={`여기에 CSV/TSV 붙여넣기\n예시: 상품ID,상품명,가격,태그,대분류(categoryL1),중분류(categoryL2)\n1038756,전통문양 봉투 2매입,1000,"전통 | 봉투 | 핑크",전통/시리즈,전통 시리즈`}
             value={raw}
-            onChange={(e) => setRaw(e.target.value)}
-            onBlur={() => raw && loadText(raw)}
+            onChange={(e) => {
+              const v = e.target.value;
+              setRaw(v);
+              if (v) loadText(v);
+            }}
             fullWidth
           />
 
