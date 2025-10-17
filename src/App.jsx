@@ -31,7 +31,7 @@ export default function App() {
   const { user } = useSavedProducts(); // user, signIn/out 등 필요시 더 전달
 
   return (
-    <BrowserRouter>
+<BrowserRouter basename="/products">
       <Navbar user={user} />
       <Routes>
         <Route path="/" element={<CatalogPage />} />

@@ -10,6 +10,25 @@ function chunk10(a){ const out=[]; for(let i=0;i<a.length;i+=10) out.push(a.slic
 const fmtKRW = (n=0)=> n.toLocaleString("ko-KR");
 const isPositive = (n)=> Number(n||0) > 0;
 
+// "재입고 예정" 판별 유틸 (여러 필드 대비)
+const hasRestockKeyword = (v) => {
+  if (!v) return false;
+  const s = Array.isArray(v) ? v.join(" ") : String(v);
+  return /재입고\s*예정|재입고예정/i.test(s);
+};
+const isRestockPending = (p) => {
+  return !!(
+    p?.restockPending ||
+    p?.restockSoon ||
+    hasRestockKeyword(p?.tags) ||
+    hasRestockKeyword(p?.badges) ||
+    hasRestockKeyword(p?.labels) ||
+    hasRestockKeyword(p?.status) ||
+    hasRestockKeyword(p?.nameBadge) ||
+    hasRestockKeyword(p?.badgeText)
+  );
+};
+
 export default function SavedCheckoutPage(){
   const { user, savedIds, loadingUser, loadingSaved } = useSavedProducts();
   const navigate = useNavigate();
@@ -44,7 +63,14 @@ export default function SavedCheckoutPage(){
           setItems(results);
           setQty(prev=>{
             const next={...prev};
-            results.forEach(p=>{ if(next[p.id]==null) next[p.id] = (typeof p.price==="number"&&p.price>0)?1:0; });
+            results.forEach(p=>{
+              const restock = isRestockPending(p);
+              if (restock) {
+                next[p.id] = 0; // 재입고 예정이면 무조건 0으로
+              } else if (next[p.id]==null) {
+                next[p.id] = (typeof p.price==="number"&&p.price>0)?1:0;
+              }
+            });
             return next;
           });
         }
@@ -57,16 +83,30 @@ export default function SavedCheckoutPage(){
 
   const rows = useMemo(()=> items.map(p=>{
     const price = typeof p.price==="number"? p.price:0;
-    const q = Math.max(0, Number(qty[p.id]??0) || 0);
-    return { ...p, _price:price, _qty:q, _subtotal: price*q };
+    const restock = isRestockPending(p);
+    const baseQty = qty[p.id] ?? 0;
+    const q = restock ? 0 : Math.max(0, Number(baseQty) || 0); // 재입고 예정이면 강제 0
+    return { ...p, _price:price, _qty:q, _subtotal: price*q, _restockPending: restock };
   }),[items,qty]);
 
   const totalQty = useMemo(()=> rows.reduce((s,r)=>s+r._qty,0),[rows]);
   const totalPrice = useMemo(()=> rows.reduce((s,r)=>s+r._subtotal,0),[rows]);
   const discount = Math.max(0, Number(discountAmount)||0);
   const finalTotal = Math.max(0, totalPrice - discount);
-const [showZero, setShowZero] = useState(false);
-  const setQtySafe=(id,v)=>{ let n=Number(v); if(!Number.isFinite(n)||n<0) n=0; if(n>9999) n=9999; setQty(prev=>({...prev,[id]:n})); };
+  const [showZero, setShowZero] = useState(false);
+
+  const setQtySafe=(id,v)=>{
+    // 재입고 예정이면 수량 고정 0
+    const p = items.find(x=>x.id===id);
+    if (p && isRestockPending(p)) {
+      setQty(prev=>({ ...prev, [id]: 0 }));
+      return;
+    }
+    let n=Number(v);
+    if(!Number.isFinite(n)||n<0) n=0;
+    if(n>9999) n=9999;
+    setQty(prev=>({...prev,[id]:n}));
+  };
 
   const handleCreateOrder = async ()=>{
     if(!user){ alert("로그인 필요"); return; }
@@ -165,34 +205,77 @@ const [showZero, setShowZero] = useState(false);
                 </thead>
                 <tbody>
                   {rows
-   .filter(r => isPositive(r._qty) || items.length <= 50) // 수량 0이면 기본 숨김. (초기 진입 시 50개 이하면 모두 보이기)
-   .filter(r => showZero || r._qty > 0)
-   .map(r => (
+                    .filter(r => isPositive(r._qty) || items.length <= 50 || r._restockPending) // 재입고 예정이면 항상 표시
+                    .filter(r => showZero || r._qty > 0 || r._restockPending)
+                    .map(r => (
                     <tr key={r.id} style={{ borderTop:"1px solid #f3f4f6" }}>
-                      <td style={{ padding:10, display:"flex", gap:10, alignItems:"center", minWidth:280 }}>
-                        <div style={{ width:60, height:60, background:"#f3f4f6", borderRadius:8, overflow:"hidden" }}>
-                          {r.imageUrl && <img src={r.imageUrl} alt={r.name} style={{ width:"100%", height:"100%", objectFit:"cover" }}/>}
+                      <td style={{ padding:10, minWidth:280 }}>
+                        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+                          <div style={{ position:"relative", width:60, height:60, background:"#f3f4f6", borderRadius:8, overflow:"hidden" }}>
+                            {r.imageUrl && (
+                              <img
+                                src={r.imageUrl}
+                                alt={r.name}
+                                style={{ width:"100%", height:"100%", objectFit:"cover", filter: r._restockPending ? "grayscale(80%)" : "none" }}
+                              />
+                            )}
+                            {r._restockPending && (
+                              <div
+                                title="재입고 예정 상품은 주문에서 제외됩니다."
+                                style={{
+                                  position:"absolute", inset:0,
+                                  background:"rgba(55,65,81,0.45)", // 회색 반투명
+                                  display:"flex", alignItems:"center", justifyContent:"center",
+                                  color:"#fff", fontSize:12, fontWeight:700, letterSpacing:0.5
+                                }}
+                              >
+                                재입고 예정
+                              </div>
+                            )}
+                          </div>
+                          <div>
+                            <div style={{ fontWeight:600, color: r._restockPending ? "#6b7280" : "#111827" }}>
+                              {r.name}
+                            </div>
+                            <div style={{ fontSize:12, color:"#6b7280" }}>
+                              {r.categoryL1 || "-"} {r.categoryL2? `> ${r.categoryL2}`:""}
+                            </div>
+                            {r._restockPending && (
+                              <div style={{ marginTop:4, fontSize:12, color:"#6b7280" }}>
+                                재입고 예정 상품은 수량을 설정할 수 없습니다.
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <div><div style={{ fontWeight:600 }}>{r.name}</div><div style={{ fontSize:12, color:"#6b7280" }}>{r.categoryL1 || "-"} {r.categoryL2? `> ${r.categoryL2}`:""}</div></div>
                       </td>
                       <td style={{ padding:10, fontSize:12, color:"#6b7280" }}>{r.productCode || r.id}</td>
                       <td style={tdRight}>{fmtKRW(r._price)} 원</td>
                       <td style={{ padding:10, textAlign:"center" }}>
-                        <div style={{ display:"inline-flex", alignItems:"center", border:"1px solid #e5e7eb", borderRadius:8 }}>
-                          <button onClick={()=>setQtySafe(r.id,(qty[r.id]||0)-1)} style={btnSpin}>−</button>
-                          <input value={qty[r.id]??0} onChange={e=>setQtySafe(r.id,e.target.value)} inputMode="numeric" style={{ width:56, textAlign:"center", border:"none", outline:"none" }}/>
-                          <button onClick={()=>setQtySafe(r.id,(qty[r.id]||0)+1)} style={btnSpin}>＋</button>
+                        <div style={{ display:"inline-flex", alignItems:"center", border:"1px solid #e5e7eb", borderRadius:8, opacity: r._restockPending ? 0.5 : 1 }}>
+                          <button onClick={()=>!r._restockPending && setQtySafe(r.id,(qty[r.id]||0)-1)} style={{...btnSpin, cursor: r._restockPending ? "not-allowed":"pointer"}} disabled={r._restockPending}>−</button>
+                          <input
+                            value={qty[r.id]??0}
+                            onChange={e=> setQtySafe(r.id,e.target.value)}
+                            inputMode="numeric"
+                            disabled={r._restockPending}
+                            style={{ width:56, textAlign:"center", border:"none", outline:"none", background:"transparent", cursor: r._restockPending ? "not-allowed":"text" }}
+                          />
+                          <button onClick={()=>!r._restockPending && setQtySafe(r.id,(qty[r.id]||0)+1)} style={{...btnSpin, cursor: r._restockPending ? "not-allowed":"pointer"}} disabled={r._restockPending}>＋</button>
                         </div>
                         <button
-        onClick={()=> setQtySafe(r.id, 0)}
-        style={{ marginLeft:8, border:"1px solid #e5e7eb", borderRadius:8, padding:"6px 10px", background:"#fff", cursor:"pointer", fontSize:12 }}
-        title="이 상품을 주문서에서 제외"
-     >
-       삭제
-     </button>
+                          onClick={()=> setQtySafe(r.id, 0)}
+                          style={{ marginLeft:8, border:"1px solid #e5e7eb", borderRadius:8, padding:"6px 10px", background:"#fff", cursor:"pointer", fontSize:12 }}
+                          title="이 상품을 주문서에서 제외"
+                        >
+                          삭제
+                        </button>
                       </td>
                       <td style={tdRight}><strong>{fmtKRW(r._subtotal)}</strong> 원</td>
-                      <td style={{ padding:10, textAlign:"center" }}>{r.link? <a href={r.link} target="_blank" rel="noopener noreferrer" style={{ fontSize:12 }}>열기</a> : <span style={{ fontSize:12, color:"#9ca3af" }}>-</span>}</td>
+                      <td style={{ padding:10, textAlign:"center" }}>
+                        {r.link
+                          ? <a href={r.link} target="_blank" rel="noopener noreferrer" style={{ fontSize:12 }}>열기</a>
+                          : <span style={{ fontSize:12, color:"#9ca3af" }}>-</span>}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

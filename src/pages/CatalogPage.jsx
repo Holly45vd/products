@@ -24,12 +24,30 @@ const CATEGORY_MAP = {
 };
 
 function tokenizeTags(input = "") {
-  // 쉼표/공백/#/| 구분 → 소문자 비교
   return String(input)
     .split(/[,|#/ ]+/)
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
 }
+
+/** 재입고 예정 판별 유틸 */
+const hasRestockKeyword = (v) => {
+  if (!v) return false;
+  const s = Array.isArray(v) ? v.join(" ") : String(v);
+  return /재입고\s*예정|재입고예정/i.test(s);
+};
+const isRestockPending = (p) => {
+  return !!(
+    p?.restockPending ||
+    p?.restockSoon ||
+    hasRestockKeyword(p?.tags) ||
+    hasRestockKeyword(p?.badges) ||
+    hasRestockKeyword(p?.labels) ||
+    hasRestockKeyword(p?.status) ||
+    hasRestockKeyword(p?.nameBadge) ||
+    hasRestockKeyword(p?.badgeText)
+  );
+};
 
 export default function CatalogPage() {
   const [items, setItems] = useState([]);
@@ -37,10 +55,9 @@ export default function CatalogPage() {
   const [loading, setLoading] = useState(true);
   const [onlySaved, setOnlySaved] = useState(false);
 
-  // 🔽 추가: 필터 상태
   const [fCatL1, setFCatL1] = useState("");
   const [fCatL2, setFCatL2] = useState("");
-  const [fTag, setFTag] = useState(""); // 다중 태그: "전통, 봉투" 식으로 입력
+  const [fTag, setFTag] = useState("");
 
   const {
     user, savedIds,
@@ -67,16 +84,12 @@ export default function CatalogPage() {
   const filtered = useMemo(() => {
     let base = items;
 
-    // 저장만 보기
     if (onlySaved && user) {
       base = base.filter((p) => savedIds.has(p.id));
     }
-
-    // 카테고리 L1/L2 필터
     if (fCatL1) base = base.filter((p) => (p.categoryL1 || "") === fCatL1);
     if (fCatL2) base = base.filter((p) => (p.categoryL2 || "") === fCatL2);
 
-    // 태그 필터 (모든 토큰이 포함되어야 통과: AND)
     const tagTokens = tokenizeTags(fTag);
     if (tagTokens.length) {
       base = base.filter((p) => {
@@ -85,7 +98,6 @@ export default function CatalogPage() {
       });
     }
 
-    // 검색 (이름/코드/카테고리/태그)
     const k = qText.trim().toLowerCase();
     if (!k) return base;
 
@@ -138,7 +150,7 @@ export default function CatalogPage() {
         />
       </div>
 
-      {/* 필터 바: 카테고리/태그 */}
+      {/* 필터 바 */}
       <div
         style={{
           display: "grid",
@@ -250,6 +262,7 @@ export default function CatalogPage() {
               product={p}
               user={user}
               isSaved={savedIds.has(p.id)}
+              restockPending={isRestockPending(p)}  
               onToggleSave={async (id) => {
                 try {
                   await toggleSave(id);
