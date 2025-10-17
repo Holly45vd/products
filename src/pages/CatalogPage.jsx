@@ -59,6 +59,10 @@ export default function CatalogPage() {
   const [fCatL2, setFCatL2] = useState("");
   const [fTag, setFTag] = useState("");
 
+  // 태그 검색 결과 기반 카테고리 파셋
+  const [facetCatsL1, setFacetCatsL1] = useState(new Set()); // 선택된 L1 카테고리들
+  const [facetMode, setFacetMode] = useState("include");     // 'include' | 'exclude'
+
   const {
     user, savedIds,
     signUp, signIn, signOutNow, toggleSave
@@ -81,6 +85,42 @@ export default function CatalogPage() {
     run();
   }, []);
 
+  /** 태그 검색 결과 기반 L1 파셋 집계 (카테고리 드롭다운 필터는 제외하고 계산) */
+  const tagFacetsL1 = useMemo(() => {
+    // 태그 검색이 없으면 파셋 숨김
+    const tagTokens = tokenizeTags(fTag);
+    if (!tagTokens.length) return new Map();
+
+    let base = items;
+
+    if (onlySaved && user) base = base.filter((p) => savedIds.has(p.id));
+
+    // 태그 조건
+    base = base.filter((p) => {
+      const tagSet = new Set((p.tags || []).map((t) => String(t).toLowerCase()));
+      return tagTokens.every((t) => tagSet.has(t));
+    });
+
+    // 키워드 검색(카테고리 드롭다운은 제외) — 파셋용 시야만 좁혀줌
+    const k = qText.trim().toLowerCase();
+    if (k) {
+      base = base.filter((p) => {
+        const hay = [p.name, p.productCode, ...(p.tags || [])]
+          .filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(k);
+      });
+    }
+
+    // L1 카운트
+    const map = new Map(); // L1 -> count
+    base.forEach((p) => {
+      const l1 = p.categoryL1 || "(미지정)";
+      map.set(l1, (map.get(l1) || 0) + 1);
+    });
+    return map;
+  }, [items, onlySaved, user, savedIds, fTag, qText]);
+
+  /** 실제 화면에 뿌릴 목록 */
   const filtered = useMemo(() => {
     let base = items;
 
@@ -99,27 +139,40 @@ export default function CatalogPage() {
     }
 
     const k = qText.trim().toLowerCase();
-    if (!k) return base;
+    if (k) {
+      base = base.filter((p) => {
+        const hay = [
+          p.name,
+          p.productCode,
+          p.categoryL1,
+          p.categoryL2,
+          ...(p.tags || []),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return hay.includes(k);
+      });
+    }
 
-    return base.filter((p) => {
-      const hay = [
-        p.name,
-        p.productCode,
-        p.categoryL1,
-        p.categoryL2,
-        ...(p.tags || []),
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(k);
-    });
-  }, [items, onlySaved, user, savedIds, fCatL1, fCatL2, fTag, qText]);
+    // 태그 파셋(포함/제외) 적용: 태그 검색이 있을 때만 의미 있게 적용
+    if (fTag && facetCatsL1.size > 0) {
+      base = base.filter((p) => {
+        const key = p.categoryL1 || "(미지정)";
+        const hit = facetCatsL1.has(key);
+        return facetMode === "include" ? hit : !hit;
+      });
+    }
+
+    return base;
+  }, [items, onlySaved, user, savedIds, fCatL1, fCatL2, fTag, qText, facetCatsL1, facetMode]);
 
   const resetFilters = () => {
     setFCatL1("");
     setFCatL2("");
     setFTag("");
+    setFacetCatsL1(new Set());
+    setFacetMode("include");
   };
 
   const l2Options = fCatL1 ? CATEGORY_MAP[fCatL1] || [] : [];
@@ -234,6 +287,85 @@ export default function CatalogPage() {
         </button>
       </div>
 
+      {/* 태그 검색 결과 기반 카테고리 파셋(포함/제외) */}
+      {fTag && tagFacetsL1.size > 0 && (
+        <div
+          style={{
+            border: "1px solid #e5e7eb",
+            borderRadius: 10,
+            padding: 10,
+            marginBottom: 10,
+            background: "#fff",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <strong>카테고리 파셋 (태그 결과 기준)</strong>
+            <label
+              style={{
+                marginLeft: "auto",
+                fontSize: 12,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              모드:
+              <select
+                value={facetMode}
+                onChange={(e) => setFacetMode(e.target.value)}
+                style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: "2px 6px" }}
+              >
+                <option value="include">포함</option>
+                <option value="exclude">제외</option>
+              </select>
+            </label>
+            <button
+              onClick={() => setFacetCatsL1(new Set())}
+              style={{ border: "1px solid #e5e7eb", background: "white", borderRadius: 8, padding: "4px 8px" }}
+              title="파셋 선택 해제"
+            >
+              선택 해제
+            </button>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {Array.from(tagFacetsL1.entries())
+              .sort((a, b) => b[1] - a[1]) // count desc
+              .map(([l1, cnt]) => {
+                const active = facetCatsL1.has(l1);
+                return (
+                  <button
+                    key={l1}
+                    onClick={() =>
+                      setFacetCatsL1((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(l1)) next.delete(l1);
+                        else next.add(l1);
+                        return next;
+                      })
+                    }
+                    style={{
+                      border: active ? "1px solid #111827" : "1px solid #e5e7eb",
+                      background: active ? (facetMode === "include" ? "#e0f2fe" : "#fee2e2") : "white",
+                      color: "#111827",
+                      borderRadius: 9999,
+                      padding: "4px 10px",
+                      fontSize: 12,
+                    }}
+                    title={`${l1} (${cnt.toLocaleString()}개)`}
+                  >
+                    {l1} · {cnt.toLocaleString()}
+                  </button>
+                );
+              })}
+          </div>
+          {facetCatsL1.size > 0 && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>
+              적용: {facetMode === "include" ? "선택 카테고리만 표시" : "선택 카테고리 제외"} · 선택 {facetCatsL1.size}개
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 결과 정보 */}
       <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>
         총 {items.length.toLocaleString()}개 / 표시 {filtered.length.toLocaleString()}개
@@ -242,6 +374,7 @@ export default function CatalogPage() {
         {fCatL2 ? ` · L2=${fCatL2}` : ""}
         {fTag ? ` · 태그=${fTag}` : ""}
         {qText ? ` · 검색="${qText}"` : ""}
+        {fTag && facetCatsL1.size > 0 ? ` · 파셋(${facetMode}): ${Array.from(facetCatsL1).join(", ")}` : ""}
       </div>
 
       {loading ? (
@@ -262,7 +395,7 @@ export default function CatalogPage() {
               product={p}
               user={user}
               isSaved={savedIds.has(p.id)}
-              restockPending={isRestockPending(p)}  
+              restockPending={isRestockPending(p)}
               onToggleSave={async (id) => {
                 try {
                   await toggleSave(id);

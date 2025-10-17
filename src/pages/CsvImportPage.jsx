@@ -66,27 +66,31 @@ function parseCsv(text) {
 
 /** ===== 헤더 매핑 ===== */
 function normalizeHeader(h = "") {
-  const k = String(h).trim().toLowerCase();
-  if (["id", "상품id", "문서id"].includes(k)) return "id";
-  if (["상품명", "name", "title"].includes(k)) return "name";
-  if (["상품코드", "productcode", "code", "pdno"].includes(k)) return "productCode";
-  if (["가격", "price"].includes(k)) return "price";
-  if (["평점", "rating"].includes(k)) return "rating";
-  if (["리뷰수", "review", "reviewcount"].includes(k)) return "reviewCount";
-  if (["조회수", "views", "view"].includes(k)) return "views";
-  if (["태그", "tags"].includes(k)) return "tags";
-  if (["링크", "url", "link"].includes(k)) return "link";
-  if (["이미지", "이미지url", "image", "imageurl", "thumbnail"].includes(k)) return "imageUrl";
-  if (["재입고", "restock", "restockable"].includes(k)) return "restockable";
-  if (["상태", "status"].includes(k)) return "status";
-  if (["재고", "stock"].includes(k)) return "stock";
-  if (["업데이트시각", "updatedat"].includes(k)) return "updatedAt";
+  const raw = String(h).trim();
+  const k = raw.toLowerCase().replace(/\s+/g, "");      // 공백 제거
+  const kNoParen = k.replace(/\([^)]*\)/g, "");          // ( ... ) 제거
 
-  // ★ 카테고리 인식 추가
-  if (["대분류", "categoryl1", "category_l1", "lnb", "lnb1"].includes(k)) return "categoryL1";
-  if (["중분류", "categoryl2", "category_l2", "sub", "lnb2"].includes(k)) return "categoryL2";
+  if (["id","상품id","문서id"].includes(k)) return "id";
+  if (["상품명","name","title"].includes(k)) return "name";
+  if (["상품코드","productcode","code","pdno"].includes(k)) return "productCode";
+  if (["가격","price"].includes(k)) return "price";
+  if (["평점","rating"].includes(k)) return "rating";
+  if (["리뷰수","review","reviewcount"].includes(k)) return "reviewCount";
+  if (["조회수","views","view"].includes(k)) return "views";
+  if (["태그","tags"].includes(k)) return "tags";
+  if (["링크","url","link"].includes(k)) return "link";
+  if (["이미지","이미지url","image","imageurl","thumbnail"].includes(kNoParen)) return "imageUrl";
+  if (["재입고","restock","restockable"].includes(k)) return "restockable";
+  if (["상태","status"].includes(k)) return "status";
+  if (["재고","stock"].includes(k)) return "stock";
+  if (["업데이트시각","updatedat"].includes(k)) return "updatedAt";
 
-  return k;
+  // 카테고리 헤더(괄호/밑줄/공백 허용)
+  const canon = raw.replace(/\s+/g,"").replace(/\([^)]*\)/g,"");
+  if (/^(대분류|categoryl1|category_l1|lnb|lnb1)$/i.test(canon)) return "categoryL1";
+  if (/^(중분류|categoryl2|category_l2|sub|lnb2)$/i.test(canon)) return "categoryL2";
+
+  return raw; // 매핑 실패 시 원문(디버깅용)
 }
 
 /** ===== 행 → 상품 객체 ===== */
