@@ -8,18 +8,13 @@ import CsvImportPage from "./pages/CsvImportPage";
 import useSavedProducts from "./hooks/useSavedProducts";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { isAdmin } from "./utils/authz";
-import SavedCheckoutPage from "./pages/SavedCheckoutPage.jsx";
-import OrdersPage from "./pages/OrdersPage.jsx";
-import OrderDetailPage from "./pages/OrderDetailPage.jsx";
 
 function Navbar({ user }) {
   return (
     <nav style={{ width:"100%", borderBottom:"1px solid #e5e7eb", marginBottom:16, background:"white" }}>
       <div style={{ maxWidth:960, margin:"0 auto", padding:"12px 16px", display:"flex", gap:12 }}>
         <Link to="/">카탈로그</Link>
-        <Link to="/saved">찜</Link>
-        <Link to="/checkout">주문서작성</Link>
-        <Link to="/orders">주문서목록</Link>
+        <Link to="/saved">Save</Link>
         {/* 관리자만 Admin 메뉴 보이기 */}
         {isAdmin(user) && <Link to="/edit">Admin</Link>}
       </div>
@@ -36,9 +31,6 @@ export default function App() {
       <Routes>
         <Route path="/" element={<CatalogPage />} />
         <Route path="/saved" element={<SavedPage />} />
-       <Route path="/checkout" element={<SavedCheckoutPage />} />
-        <Route path="/orders" element={<OrdersPage />} />
-        <Route path="/orders/:orderId" element={<OrderDetailPage />} />
         <Route path="/import" element={
           <ProtectedRoute user={user} allow={isAdmin}>
             <ImportPage />

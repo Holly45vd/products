@@ -1,6 +1,8 @@
 // src/components/Navbar.jsx
 import React, { useState } from "react";
 import AuthModal from "./AuthModal";
+import { isAdmin } from "../utils/authz";
+import { Link } from "react-router-dom";
 
 export default function Navbar({ user, onSignIn, onSignUp, onSignOut, onlySaved, onToggleOnlySaved }) {
   const [open, setOpen] = useState(false);
@@ -13,13 +15,23 @@ export default function Navbar({ user, onSignIn, onSignUp, onSignOut, onlySaved,
             <input type="checkbox" checked={onlySaved} onChange={e=>onToggleOnlySaved(e.target.checked)} />
             저장만 보기
           </label>
+
+          {/* 관리자만 Admin 링크 노출 (선택) */}
+          {isAdmin(user) && (
+            <Link to="/edit" style={{ fontSize:12 }}>Admin</Link>
+          )}
+
           {user ? (
             <>
               <span style={{ fontSize:12, color:"#374151" }}>{user.email}</span>
-              <button onClick={onSignOut} style={{ borderRadius:8, padding:"6px 10px", border:"1px solid #e5e7eb", background:"#fff" }}>로그아웃</button>
+              <button onClick={onSignOut} style={{ borderRadius:8, padding:"6px 10px", border:"1px solid #e5e7eb", background:"#fff" }}>
+                로그아웃
+              </button>
             </>
           ) : (
-            <button onClick={()=>setOpen(true)} style={{ borderRadius:8, padding:"6px 10px", border:"1px solid #e5e7eb", background:"#111827", color:"#fff" }}>로그인</button>
+            <button onClick={()=>setOpen(true)} style={{ borderRadius:8, padding:"6px 10px", border:"1px solid #e5e7eb", background:"#111827", color:"#fff" }}>
+              로그인
+            </button>
           )}
         </div>
       </nav>
